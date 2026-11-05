@@ -7,8 +7,6 @@ on:
   push:
     branches:
       - matrix-root-test
-    paths:
-      - ".github/workflows/matrix-root-test.yml"
 
 permissions:
   contents: read
@@ -20,8 +18,8 @@ concurrency:
 jobs:
   baseline-build:
     name: Build sweet (ARM64 / Linux 4.14)
-    runs-on: ubuntu-22.04
-    timeout-minutes: 120
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
 
     steps:
       # --------------------------------------------------
@@ -48,19 +46,22 @@ jobs:
           echo "========================================"
 
           echo "Repository: $GITHUB_REPOSITORY"
-          echo "Branch: matrix-root-test"
-          echo "Commit: $(git rev-parse HEAD)"
+          echo "Branch: $GITHUB_REF_NAME"
+          echo "Commit: $GITHUB_SHA"
 
           echo
-          echo "Kernel Makefile:"
-          head -n 10 Makefile
+          echo "Kernel version:"
+          head -n 5 Makefile
 
           echo
           echo "Source status:"
           git status --short
 
           git rev-parse HEAD > artifacts/source-commit.txt
-          git branch --show-current > artifacts/source-branch.txt
+          echo "$GITHUB_REF_NAME" > artifacts/source-branch.txt
+
+          git log -1 --format=fuller \
+            > artifacts/source-commit-details.txt
 
       # --------------------------------------------------
       # 3. INSTALL BUILD DEPENDENCIES
@@ -82,7 +83,6 @@ jobs:
             libssl-dev \
             libelf-dev \
             libncurses-dev \
-            libncurses5-dev \
             python3 \
             python-is-python3 \
             perl \
@@ -95,10 +95,52 @@ jobs:
             zip \
             rsync \
             device-tree-compiler \
-            liblz4-tool
+            lz4 \
+            gzip \
+            xz-utils
 
       # --------------------------------------------------
-      # 4. DOWNLOAD AND VALIDATE NEUTRON CLANG
+      # 4. VALIDATE BUILD HOST
+      # --------------------------------------------------
+      - name: Validate build host
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "========================================"
+          echo "MR MATRIX BUILD HOST"
+          echo "========================================"
+
+          cat /etc/os-release
+
+          echo
+          echo "Architecture:"
+          uname -m
+
+          echo
+          echo "GLIBC version:"
+          getconf GNU_LIBC_VERSION
+
+          echo
+          echo "GCC version:"
+          gcc --version | head -n 1
+
+          echo
+          echo "Make version:"
+          make --version | head -n 1
+
+          GLIBC_VERSION="$(getconf GNU_LIBC_VERSION | awk '{print $2}')"
+
+          if [ "$(printf '%s\n' "2.38" "$GLIBC_VERSION" | sort -V | head -n 1)" != "2.38" ]; then
+            echo "ERROR: Host GLIBC is older than 2.38."
+            exit 1
+          fi
+
+          echo
+          echo "SUCCESS: Build host compatibility check passed."
+
+      # --------------------------------------------------
+      # 5. DOWNLOAD AND VALIDATE NEUTRON CLANG
       # --------------------------------------------------
       - name: Download Neutron Clang
         shell: bash
@@ -112,35 +154,51 @@ jobs:
 
           echo "Fetching latest Neutron Clang release..."
 
-          RELEASE_JSON=$(curl -fsSL \
+          RELEASE_JSON="$(curl -fsSL \
             --retry 3 \
-            "$API")
+            --retry-delay 2 \
+            "$API")"
 
-          URL=$(echo "$RELEASE_JSON" | jq -r \
-            '[.assets[] | select(.name | endswith(".tar.zst"))][0].browser_download_url // empty')
+          RELEASE_TAG="$(echo "$RELEASE_JSON" | jq -r '.tag_name // "unknown"')"
+
+          URL="$(echo "$RELEASE_JSON" | jq -r \
+            '[.assets[] | select(.name | endswith(".tar.zst"))][0].browser_download_url // empty')"
 
           if [ -z "$URL" ]; then
             echo "ERROR: No .tar.zst Clang archive found."
+
+            echo "Available assets:"
             echo "$RELEASE_JSON" | jq -r '.assets[].name'
+
             exit 1
           fi
 
-          echo "Selected archive:"
-          echo "$URL"
+          echo "Release: $RELEASE_TAG"
+          echo "Selected archive: $URL"
 
           mkdir -p "$ROOT"
 
-          echo "Downloading Clang..."
-          curl -fL --retry 3 "$URL" -o "$ARCHIVE"
+          echo "Downloading Neutron Clang..."
+
+          curl -fL \
+            --retry 3 \
+            --retry-delay 2 \
+            "$URL" \
+            -o "$ARCHIVE"
+
+          echo "Validating archive..."
+
+          zstd -t "$ARCHIVE"
 
           echo "Extracting Clang..."
+
           tar --zstd -xf "$ARCHIVE" -C "$ROOT"
 
           echo "Searching for Clang executable..."
 
           CLANG_PATH=""
 
-          # First: find a working executable named clang.
+          # Search for the standard clang executable.
           while IFS= read -r -d '' FILE; do
             if [ -x "$FILE" ]; then
               CLANG_PATH="$FILE"
@@ -153,7 +211,7 @@ jobs:
               -print0
           )
 
-          # Fallback: find a versioned Clang executable.
+          # Fallback for versioned Clang executables.
           if [ -z "$CLANG_PATH" ]; then
             while IFS= read -r -d '' FILE; do
               if [ -x "$FILE" ]; then
@@ -169,54 +227,96 @@ jobs:
           fi
 
           if [ -z "$CLANG_PATH" ]; then
-            echo "ERROR: No executable Clang binary found."
+            echo "ERROR: Executable Clang binary not found."
+
             echo "Extracted archive contents:"
             find "$ROOT" -maxdepth 5 -print
+
             exit 1
           fi
 
           CLANG_BIN="$(dirname "$CLANG_PATH")"
 
-          # Create the standard clang command if only
-          # a versioned executable was discovered.
+          # Create clang symlink if only a versioned binary exists.
           if [ "$(basename "$CLANG_PATH")" != "clang" ]; then
             ln -sf "$(basename "$CLANG_PATH")" \
               "$CLANG_BIN/clang"
           fi
 
           if [ ! -x "$CLANG_BIN/clang" ]; then
-            echo "ERROR: Clang is not executable."
+            echo "ERROR: Clang executable validation failed."
             exit 1
           fi
 
-          # Validate the LLVM linker.
-          if [ ! -x "$CLANG_BIN/ld.lld" ]; then
-            echo "ERROR: ld.lld not found beside Clang."
-            find "$ROOT" -name 'ld.lld*' -print
-            exit 1
-          fi
+          # Validate required LLVM executables.
+          REQUIRED_TOOLS=(
+            clang
+            ld.lld
+            llvm-ar
+            llvm-nm
+            llvm-objcopy
+            llvm-objdump
+            llvm-readelf
+            llvm-strip
+          )
 
-          # Add the toolchain to subsequent GitHub Actions steps.
+          for TOOL in "${REQUIRED_TOOLS[@]}"; do
+            if [ ! -x "$CLANG_BIN/$TOOL" ]; then
+              echo "ERROR: Required LLVM tool missing: $TOOL"
+
+              find "$ROOT" -name "$TOOL*" -print
+
+              exit 1
+            fi
+          done
+
+          # Add toolchain to subsequent workflow steps.
           echo "$CLANG_BIN" >> "$GITHUB_PATH"
 
           echo "========================================"
           echo "NEUTRON CLANG VALIDATION"
           echo "========================================"
 
+          echo "Release: $RELEASE_TAG"
           echo "Clang directory: $CLANG_BIN"
           echo "Clang executable: $CLANG_PATH"
 
+          echo
+          echo "Clang version:"
           "$CLANG_BIN/clang" --version
+
+          echo
+          echo "LLD version:"
           "$CLANG_BIN/ld.lld" --version
+
+          echo
+          echo "LLVM tools:"
+          for TOOL in "${REQUIRED_TOOLS[@]}"; do
+            echo "OK: $TOOL"
+          done
+
+          echo
+          echo "Clang shared-library dependencies:"
+          ldd "$CLANG_BIN/clang"
+
+          if ldd "$CLANG_BIN/clang" | grep -q "not found"; then
+            echo "ERROR: Clang has unresolved shared libraries."
+            exit 1
+          fi
 
           echo "SUCCESS: Neutron Clang is ready."
 
+          echo "$RELEASE_TAG" > artifacts/clang-release.txt
           echo "$CLANG_BIN" > artifacts/clang-directory.txt
+
           "$CLANG_BIN/clang" --version \
             > artifacts/clang-version.txt
 
+          "$CLANG_BIN/ld.lld" --version \
+            > artifacts/lld-version.txt
+
       # --------------------------------------------------
-      # 5. VALIDATE SWEET SOURCE AND DEFCONFIG
+      # 6. VALIDATE SWEET SOURCE AND DEFCONFIG
       # --------------------------------------------------
       - name: Validate sweet defconfig
         shell: bash
@@ -225,10 +325,17 @@ jobs:
 
           DEFCONFIG="arch/arm64/configs/sweet_defconfig"
 
-          echo "Checking kernel source..."
+          echo "========================================"
+          echo "SWEET SOURCE VALIDATION"
+          echo "========================================"
 
           if [ ! -f Makefile ]; then
             echo "ERROR: Kernel Makefile missing."
+            exit 1
+          fi
+
+          if [ ! -f arch/arm64/Makefile ]; then
+            echo "ERROR: ARM64 Makefile missing."
             exit 1
           fi
 
@@ -237,12 +344,16 @@ jobs:
             exit 1
           fi
 
-          if [ ! -f arch/arm64/Makefile ]; then
-            echo "ERROR: ARM64 kernel Makefile missing."
-            exit 1
-          fi
+          echo "Kernel version:"
+          make kernelversion
 
-          echo "SUCCESS: sweet_defconfig found."
+          echo
+          echo "Defconfig:"
+          echo "$DEFCONFIG"
+
+          echo
+          echo "Defconfig line count:"
+          wc -l "$DEFCONFIG"
 
           sha256sum "$DEFCONFIG" \
             > artifacts/defconfig.sha256
@@ -250,8 +361,11 @@ jobs:
           wc -l "$DEFCONFIG" \
             > artifacts/defconfig-lines.txt
 
+          echo
+          echo "SUCCESS: Sweet source validation passed."
+
       # --------------------------------------------------
-      # 6. GENERATE BASELINE CONFIGURATION
+      # 7. GENERATE BASELINE CONFIGURATION
       # --------------------------------------------------
       - name: Generate baseline configuration
         shell: bash
@@ -261,49 +375,35 @@ jobs:
           export ARCH=arm64
           export SUBARCH=arm64
 
-          export CC=clang
-          export HOSTCC=clang
-          export LD=ld.lld
-
-          export AR=llvm-ar
-          export NM=llvm-nm
-          export OBJCOPY=llvm-objcopy
-          export OBJDUMP=llvm-objdump
-          export STRIP=llvm-strip
-
           export CROSS_COMPILE=aarch64-linux-gnu-
           export CROSS_COMPILE_ARM32=arm-linux-gnueabi-
 
           mkdir -p out artifacts
 
-          echo "Generating sweet_defconfig..."
+          echo "========================================"
+          echo "GENERATING SWEET CONFIGURATION"
+          echo "========================================"
+
+          echo "Compiler: Neutron Clang"
+          echo "LLVM mode: enabled"
+          echo "Integrated assembler: enabled"
+          echo "Architecture: ARM64"
 
           make O=out \
             ARCH=arm64 \
-            CC=clang \
-            HOSTCC=clang \
-            LD=ld.lld \
-            AR=llvm-ar \
-            NM=llvm-nm \
-            OBJCOPY=llvm-objcopy \
-            OBJDUMP=llvm-objdump \
-            STRIP=llvm-strip \
+            LLVM=1 \
+            LLVM_IAS=1 \
             CROSS_COMPILE="$CROSS_COMPILE" \
             CROSS_COMPILE_ARM32="$CROSS_COMPILE_ARM32" \
             sweet_defconfig
 
+          echo
           echo "Generating olddefconfig..."
 
           make O=out \
             ARCH=arm64 \
-            CC=clang \
-            HOSTCC=clang \
-            LD=ld.lld \
-            AR=llvm-ar \
-            NM=llvm-nm \
-            OBJCOPY=llvm-objcopy \
-            OBJDUMP=llvm-objdump \
-            STRIP=llvm-strip \
+            LLVM=1 \
+            LLVM_IAS=1 \
             CROSS_COMPILE="$CROSS_COMPILE" \
             CROSS_COMPILE_ARM32="$CROSS_COMPILE_ARM32" \
             olddefconfig
@@ -315,19 +415,18 @@ jobs:
 
           cp out/.config artifacts/baseline.config
 
-          echo "========================================"
-          echo "BASELINE CONFIGURATION GENERATED"
-          echo "========================================"
-
-          echo "Configuration lines:"
-          wc -l out/.config
-
-          echo "Configuration checksum:"
           sha256sum out/.config \
             > artifacts/baseline-config.sha256
 
+          echo
+          echo "Configuration line count:"
+          wc -l out/.config
+
+          echo
+          echo "SUCCESS: Baseline configuration generated."
+
       # --------------------------------------------------
-      # 7. COMPILE BASELINE KERNEL
+      # 8. COMPILE BASELINE KERNEL
       # --------------------------------------------------
       - name: Compile baseline kernel
         shell: bash
@@ -336,16 +435,6 @@ jobs:
 
           export ARCH=arm64
           export SUBARCH=arm64
-
-          export CC=clang
-          export HOSTCC=clang
-          export LD=ld.lld
-
-          export AR=llvm-ar
-          export NM=llvm-nm
-          export OBJCOPY=llvm-objcopy
-          export OBJDUMP=llvm-objdump
-          export STRIP=llvm-strip
 
           export CROSS_COMPILE=aarch64-linux-gnu-
           export CROSS_COMPILE_ARM32=arm-linux-gnueabi-
@@ -356,88 +445,117 @@ jobs:
           echo "MR MATRIX BASELINE COMPILATION"
           echo "========================================"
 
-          echo "Architecture: ARM64"
           echo "Target: Xiaomi sweet"
+          echo "Architecture: ARM64"
           echo "Kernel generation: Linux 4.14"
-          echo "Compiler: Clang"
+          echo "Compiler: Neutron Clang"
           echo "Linker: LLD"
+          echo "LLVM: enabled"
+          echo "Integrated assembler: enabled"
           echo "Build jobs: $JOBS"
+
+          echo
+          echo "Starting kernel compilation..."
 
           set -o pipefail
 
           make -j"$JOBS" O=out \
             ARCH=arm64 \
-            CC=clang \
-            HOSTCC=clang \
-            LD=ld.lld \
-            AR=llvm-ar \
-            NM=llvm-nm \
-            OBJCOPY=llvm-objcopy \
-            OBJDUMP=llvm-objdump \
-            STRIP=llvm-strip \
+            LLVM=1 \
+            LLVM_IAS=1 \
             CROSS_COMPILE="$CROSS_COMPILE" \
             CROSS_COMPILE_ARM32="$CROSS_COMPILE_ARM32" \
             2>&1 | tee artifacts/build.log
 
+          echo
+          echo "SUCCESS: Kernel compilation completed."
+
       # --------------------------------------------------
-      # 8. VALIDATE KERNEL OUTPUT
+      # 9. VALIDATE AND COLLECT KERNEL OUTPUT
       # --------------------------------------------------
       - name: Validate kernel output
         shell: bash
         run: |
           set -euo pipefail
 
-          IMAGE="out/arch/arm64/boot/Image.gz"
-          RAW_IMAGE="out/arch/arm64/boot/Image"
+          BOOT_DIR="out/arch/arm64/boot"
 
-          echo "Checking kernel output..."
+          mkdir -p artifacts/kernel-output
 
-          if [ -s "$IMAGE" ]; then
-            cp "$IMAGE" artifacts/Image.gz
-            echo "Found Image.gz"
+          echo "========================================"
+          echo "KERNEL OUTPUT VALIDATION"
+          echo "========================================"
 
-          elif [ -s "$RAW_IMAGE" ]; then
-            echo "Image.gz was not generated."
-            echo "Compressing the generated Image..."
-
-            gzip -c "$RAW_IMAGE" > artifacts/Image.gz
-
-          else
-            echo "ERROR: No ARM64 kernel Image found."
-            find out/arch/arm64/boot \
-              -maxdepth 2 \
-              -type f \
-              -printf '%p (%s bytes)\n' || true
+          if [ ! -d "$BOOT_DIR" ]; then
+            echo "ERROR: ARM64 boot output directory missing."
             exit 1
           fi
 
-          if [ -s out/arch/arm64/boot/Image ]; then
-            cp out/arch/arm64/boot/Image \
-              artifacts/Image
+          IMAGE=""
+
+          for NAME in \
+            Image.gz-dtb \
+            Image-dtb \
+            Image.gz \
+            Image
+          do
+            if [ -s "$BOOT_DIR/$NAME" ]; then
+              IMAGE="$BOOT_DIR/$NAME"
+              break
+            fi
+          done
+
+          if [ -z "$IMAGE" ]; then
+            echo "ERROR: No valid ARM64 kernel image found."
+
+            find "$BOOT_DIR" \
+              -maxdepth 3 \
+              -type f \
+              -printf '%p (%s bytes)\n' || true
+
+            exit 1
           fi
 
-          if [ -s out/arch/arm64/boot/dtb.img ]; then
-            cp out/arch/arm64/boot/dtb.img artifacts/
+          echo "Kernel image found:"
+          ls -lh "$IMAGE"
+
+          cp "$IMAGE" artifacts/kernel-output/
+
+          # Collect device tree and overlay images when present.
+          for NAME in dtb.img dtbo.img; do
+            if [ -s "$BOOT_DIR/$NAME" ]; then
+              cp "$BOOT_DIR/$NAME" artifacts/kernel-output/
+            fi
+          done
+
+          # Collect device tree source output.
+          if [ -d "$BOOT_DIR/dts" ]; then
+            tar -czf artifacts/kernel-output/dts.tar.gz \
+              -C "$BOOT_DIR" dts
           fi
 
-          if [ -d out/arch/arm64/boot/dts ]; then
-            tar -czf artifacts/dts.tar.gz \
-              -C out/arch/arm64/boot dts
-          fi
+          # Collect standalone DTB files if generated.
+          find "$BOOT_DIR" \
+            -maxdepth 3 \
+            -type f \
+            -name '*.dtb' \
+            -print \
+            > artifacts/kernel-output/dtb-files.txt
 
-          echo "========================================"
-          echo "BASELINE KERNEL OUTPUT"
-          echo "========================================"
+          echo
+          echo "Kernel output files:"
+          ls -lh artifacts/kernel-output/
 
-          ls -lh artifacts/
+          echo
+          echo "Image checksum:"
+          sha256sum "artifacts/kernel-output/$(basename "$IMAGE")" \
+            > artifacts/kernel-output/kernel-image.sha256
 
-          sha256sum artifacts/Image.gz \
-            > artifacts/kernel-image.sha256
-
-          echo "SUCCESS: Kernel image generated."
+          echo
+          echo "SUCCESS: Kernel output validated."
 
       # --------------------------------------------------
-      # 9. UPLOAD BUILD ARTIFACTS
+      # 10. UPLOAD BUILD ARTIFACTS
       # --------------------------------------------------
       - name: Upload baseline build artifacts
         if: always()
