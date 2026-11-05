@@ -1,0 +1,255 @@
+
+name: MR MATRIX - Sweet BakaSU Integration Audit
+
+on:
+  workflow_dispatch:
+
+  push:
+    branches:
+      - matrix-bakasu-test
+
+permissions:
+  contents: read
+
+concurrency:
+  group: matrix-bakasu-test-audit
+  cancel-in-progress: false
+
+jobs:
+  bakasu-audit:
+    name: Audit BakaSU integration (sweet / Linux 4.14)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+
+    steps:
+      # --------------------------------------------------
+      # 1. CHECKOUT TEST BRANCH
+      # --------------------------------------------------
+      - name: Checkout matrix-bakasu-test
+        uses: actions/checkout@v4
+        with:
+          ref: matrix-bakasu-test
+          fetch-depth: 1
+
+      # --------------------------------------------------
+      # 2. PIN BAKASU SOURCE
+      # --------------------------------------------------
+      - name: Download pinned BakaSU setup script
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          BAKASU_COMMIT="516d3e87fbc986ccefdde2c2765f1700612441a9"
+
+          SCRIPT="$RUNNER_TEMP/bakasu-setup.sh"
+
+          curl -fL --retry 3 \
+            "https://raw.githubusercontent.com/Baka-SU/BakaSU/${BAKASU_COMMIT}/kernel/setup.sh" \
+            -o "$SCRIPT"
+
+          test -s "$SCRIPT"
+
+          echo "$BAKASU_COMMIT" > bakasu-commit.txt
+
+          echo "Pinned BakaSU setup script downloaded."
+          echo "Commit: $BAKASU_COMMIT"
+
+      # --------------------------------------------------
+      # 3. INTEGRATE BAKASU DRIVER
+      # --------------------------------------------------
+      - name: Integrate BakaSU driver
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          BAKASU_COMMIT="516d3e87fbc986ccefdde2c2765f1700612441a9"
+
+          echo "========================================"
+          echo "MR MATRIX - BAKASU DRIVER INTEGRATION"
+          echo "========================================"
+
+          sh "$RUNNER_TEMP/bakasu-setup.sh" "$BAKASU_COMMIT"
+
+          echo
+          echo "Checking pinned BakaSU revision..."
+
+          ACTUAL="$(git -C KernelSU rev-parse HEAD)"
+
+          echo "Expected: $BAKASU_COMMIT"
+          echo "Actual:   $ACTUAL"
+
+          test "$ACTUAL" = "$BAKASU_COMMIT"
+
+          echo
+          echo "Checking driver symlink..."
+
+          test -L drivers/kernelsu
+          test -d drivers/kernelsu
+
+          readlink drivers/kernelsu
+
+          echo
+          echo "Checking Makefile integration..."
+
+          grep -nF 'obj-$(CONFIG_KSU) += kernelsu/' drivers/Makefile
+
+          echo
+          echo "Checking Kconfig integration..."
+
+          grep -nF 'source "drivers/kernelsu/Kconfig"' drivers/Kconfig
+
+          echo
+          echo "SUCCESS: BakaSU driver integration verified."
+
+      # --------------------------------------------------
+      # 4. AUDIT REQUIRED MANUAL HOOKS
+      # --------------------------------------------------
+      - name: Audit Linux 4.14 manual hook locations
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p artifacts
+
+          {
+            echo "========================================"
+            echo "MR MATRIX - BAKASU MANUAL HOOK AUDIT"
+            echo "========================================"
+
+            echo
+            echo "Kernel version:"
+            make kernelversion
+
+            echo
+            echo "BakaSU revision:"
+            git -C KernelSU rev-parse HEAD
+
+            echo
+            echo "========================================"
+            echo "REQUIRED HOOK SYMBOLS"
+            echo "========================================"
+
+            for ITEM in \
+              "fs/exec.c:ksu_handle_execveat" \
+              "fs/open.c:ksu_handle_faccessat" \
+              "fs/stat.c:ksu_handle_stat" \
+              "fs/stat.c:ksu_handle_newfstat_ret" \
+              "fs/stat.c:ksu_handle_fstat64_ret" \
+              "kernel/reboot.c:ksu_handle_sys_reboot" \
+              "kernel/sys.c:ksu_handle_setresuid" \
+              "fs/read_write.c:ksu_handle_sys_read" \
+              "drivers/input/input.c:ksu_handle_input_handle_event"
+            do
+              FILE="${ITEM%%:*}"
+              SYMBOL="${ITEM#*:}"
+
+              if grep -nF "$SYMBOL" "$FILE"; then
+                echo "FOUND: $SYMBOL in $FILE"
+              else
+                echo "NOT FOUND: $SYMBOL in $FILE"
+              fi
+            done
+
+            echo
+            echo "========================================"
+            echo "CURRENT EXECVE IMPLEMENTATION"
+            echo "========================================"
+
+            grep -n -A18 -B8 \
+              'do_execveat_common' fs/exec.c || true
+
+            echo
+            echo "========================================"
+            echo "CURRENT FACCESAT IMPLEMENTATION"
+            echo "========================================"
+
+            grep -n -A25 -B8 \
+              'SYSCALL_DEFINE3(faccessat' fs/open.c || true
+
+            echo
+            echo "========================================"
+            echo "CURRENT STAT IMPLEMENTATION"
+            echo "========================================"
+
+            grep -n -A25 -B8 \
+              'SYSCALL_DEFINE4(newfstatat' fs/stat.c || true
+
+            echo
+            echo "========================================"
+            echo "CURRENT REBOOT IMPLEMENTATION"
+            echo "========================================"
+
+            grep -n -A30 -B8 \
+              'SYSCALL_DEFINE4(reboot' kernel/reboot.c || true
+
+            echo
+            echo "========================================"
+            echo "CURRENT SETRESUID IMPLEMENTATION"
+            echo "========================================"
+
+            grep -n -A30 -B8 \
+              'SYSCALL_DEFINE3(setresuid' kernel/sys.c || true
+
+            echo
+            echo "========================================"
+            echo "CURRENT READ IMPLEMENTATION"
+            echo "========================================"
+
+            grep -n -A25 -B8 \
+              'SYSCALL_DEFINE3(read' fs/read_write.c || true
+
+            echo
+            echo "========================================"
+            echo "CURRENT INPUT EVENT IMPLEMENTATION"
+            echo "========================================"
+
+            grep -n -A30 -B8 \
+              'void input_event' drivers/input/input.c || true
+
+          } 2>&1 | tee artifacts/bakasu-hook-audit.txt
+
+      # --------------------------------------------------
+      # 5. RECORD INTEGRATION DIFF
+      # --------------------------------------------------
+      - name: Record integration changes
+        if: always()
+        shell: bash
+        run: |
+          mkdir -p artifacts
+
+          git diff -- drivers/Kconfig drivers/Makefile \
+            > artifacts/driver-integration.diff || true
+
+          {
+            echo "Repository: $GITHUB_REPOSITORY"
+            echo "Branch: matrix-bakasu-test"
+            echo "Source commit: $GITHUB_SHA"
+
+            if [ -d KernelSU/.git ]; then
+              echo "BakaSU commit:"
+              git -C KernelSU rev-parse HEAD
+            fi
+
+            echo
+            echo "Working tree:"
+            git status --short
+          } > artifacts/source-audit.txt
+
+          if [ -L drivers/kernelsu ]; then
+            readlink drivers/kernelsu \
+              > artifacts/driver-symlink.txt
+          fi
+
+      # --------------------------------------------------
+      # 6. UPLOAD AUDIT REPORT
+      # --------------------------------------------------
+      - name: Upload BakaSU audit report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: MR-MATRIX-sweet-bakasu-audit
+          path: |
+            artifacts/
+            bakasu-commit.txt
+          if-no-files-found: warn
+          retention-days: 14
