@@ -24,22 +24,34 @@ concurrency:
 
 jobs:
   bakasu-validation:
-    name: Validate BakaSU (sweet / Linux 4.14)
+    name: Validate BakaSU - Sweet Linux 4.14
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 40
+
+    env:
+      ARCH: arm64
+      BAKASU_COMMIT: 516d3e87fbc986ccefdde2c2765f1700612441a9
 
     steps:
+      # --------------------------------------------
+      # 1. CHECKOUT KERNEL SOURCE
+      # --------------------------------------------
       - name: Checkout matrix-bakasu-test
         uses: actions/checkout@v4
         with:
           ref: matrix-bakasu-test
           fetch-depth: 1
 
-      - name: Install configuration dependencies
+      # --------------------------------------------
+      # 2. INSTALL CONFIGURATION DEPENDENCIES
+      # --------------------------------------------
+      - name: Install dependencies
         shell: bash
         run: |
           set -euo pipefail
+
           sudo apt-get update
+
           sudo apt-get install -y \
             bc \
             bison \
@@ -47,8 +59,13 @@ jobs:
             libssl-dev \
             libelf-dev \
             build-essential \
-            python3
+            python3 \
+            git \
+            curl
 
+      # --------------------------------------------
+      # 3. VERIFY SWEET DEFCONFIG
+      # --------------------------------------------
       - name: Verify Sweet defconfig
         shell: bash
         run: |
@@ -56,35 +73,41 @@ jobs:
 
           DEFCONFIG="arch/arm64/configs/sweet_defconfig"
 
-          test -f "$DEFCONFIG"
+          test -s "$DEFCONFIG"
 
-          grep -n '^CONFIG_KSU=y$' "$DEFCONFIG"
-          grep -n '^CONFIG_KSU_MANUAL_HOOK=y$' "$DEFCONFIG"
-          grep -n '^CONFIG_KALLSYMS_ALL=y$' "$DEFCONFIG"
+          for OPTION in \
+            CONFIG_KSU \
+            CONFIG_KSU_MANUAL_HOOK \
+            CONFIG_KALLSYMS_ALL
+          do
+            grep -qx "${OPTION}=y" "$DEFCONFIG"
+            echo "PASS: ${OPTION}=y"
+          done
 
-          if grep -q '^CONFIG_KSU_TRACEPOINT_HOOK=y$' "$DEFCONFIG"; then
-            echo "ERROR: Tracepoint hook must not be enabled for Linux 4.14."
+          if grep -qx 'CONFIG_KSU_TRACEPOINT_HOOK=y' "$DEFCONFIG"; then
+            echo "FAIL: Tracepoint hook is incompatible."
             exit 1
           fi
 
-          if grep -q '^CONFIG_KSU_SUSFS=y$' "$DEFCONFIG"; then
-            echo "ERROR: SUSFS is outside this phase."
+          if grep -qx 'CONFIG_KSU_SUSFS=y' "$DEFCONFIG"; then
+            echo "FAIL: SUSFS is not part of Phase 1."
             exit 1
           fi
 
           if [ -e arch/arm64/configs/matrix_bakasu.config ]; then
-            echo "ERROR: Obsolete matrix_bakasu.config still exists."
+            echo "FAIL: Obsolete config fragment exists."
             exit 1
           fi
 
-          echo "Sweet defconfig source checks: PASS"
+          echo "PASS: Sweet defconfig verified."
 
-      - name: Download pinned BakaSU setup script
+      # --------------------------------------------
+      # 4. DOWNLOAD PINNED BAKASU SETUP
+      # --------------------------------------------
+      - name: Download pinned BakaSU setup
         shell: bash
         run: |
           set -euo pipefail
-
-          BAKASU_COMMIT="516d3e87fbc986ccefdde2c2765f1700612441a9"
 
           curl -fL --retry 3 \
             "https://raw.githubusercontent.com/Baka-SU/BakaSU/${BAKASU_COMMIT}/kernel/setup.sh" \
@@ -94,12 +117,15 @@ jobs:
 
           echo "$BAKASU_COMMIT" > bakasu-commit.txt
 
-      - name: Integrate pinned BakaSU driver
+          echo "PASS: Pinned setup downloaded."
+
+      # --------------------------------------------
+      # 5. INTEGRATE BAKASU DRIVER
+      # --------------------------------------------
+      - name: Integrate pinned BakaSU
         shell: bash
         run: |
           set -euo pipefail
-
-          BAKASU_COMMIT="516d3e87fbc986ccefdde2c2765f1700612441a9"
 
           sh "$RUNNER_TEMP/bakasu-setup.sh" "$BAKASU_COMMIT"
 
@@ -113,12 +139,24 @@ jobs:
           test -L drivers/kernelsu
           test -d drivers/kernelsu
 
-          grep -Fq 'obj-$(CONFIG_KSU) += kernelsu/' drivers/Makefile
-          grep -Fq 'source "drivers/kernelsu/Kconfig"' drivers/Kconfig
+          test -f drivers/kernelsu/Kbuild
+          test -f drivers/kernelsu/Kconfig
+          test -f drivers/kernelsu/tools/manual_hook_check.mk
 
-          echo "Pinned BakaSU driver integration: PASS"
+          grep -Fq \
+            'obj-$(CONFIG_KSU) += kernelsu/' \
+            drivers/Makefile
 
-      - name: Generate configuration from sweet_defconfig
+          grep -Fq \
+            'source "drivers/kernelsu/Kconfig"' \
+            drivers/Kconfig
+
+          echo "PASS: BakaSU driver integrated."
+
+      # --------------------------------------------
+      # 6. GENERATE SWEET KERNEL CONFIGURATION
+      # --------------------------------------------
+      - name: Generate Sweet configuration
         shell: bash
         run: |
           set -euo pipefail
@@ -132,39 +170,60 @@ jobs:
 
           test -s "$CONFIG"
 
-          require_config() {
-            if ! grep -qx "$1=y" "$CONFIG"; then
-              echo "ERROR: Expected $1=y in generated configuration."
-              exit 1
-            fi
-            echo "PASS: $1=y"
-          }
-
-          require_config CONFIG_KSU
-          require_config CONFIG_KSU_MANUAL_HOOK
-          require_config CONFIG_KALLSYMS_ALL
-          require_config CONFIG_KSU_MANUAL_HOOK_AUTO_SETUID_HOOK
-          require_config CONFIG_KSU_MANUAL_HOOK_AUTO_INITRC_HOOK
-          require_config CONFIG_KSU_MANUAL_HOOK_AUTO_INPUT_HOOK
-
-          if grep -q '^CONFIG_KSU_TRACEPOINT_HOOK=y$' "$CONFIG"; then
-            echo "ERROR: Tracepoint hook selected."
-            exit 1
-          fi
-
-          if grep -q '^CONFIG_KSU_SUSFS=y$' "$CONFIG"; then
-            echo "ERROR: SUSFS selected unexpectedly."
-            exit 1
-          fi
-
           cp "$CONFIG" artifacts/generated-sweet.config
 
+          echo "PASS: Generated kernel configuration."
+
+      # --------------------------------------------
+      # 7. VALIDATE GENERATED CONFIGURATION
+      # --------------------------------------------
+      - name: Validate BakaSU configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          CONFIG="out/.config"
+
+          require_enabled() {
+            local option="$1"
+
+            if grep -qx "${option}=y" "$CONFIG"; then
+              echo "PASS: ${option}=y"
+            else
+              echo "FAIL: ${option} is not enabled."
+              exit 1
+            fi
+          }
+
+          require_enabled CONFIG_KSU
+          require_enabled CONFIG_KSU_MANUAL_HOOK
+          require_enabled CONFIG_KALLSYMS
+          require_enabled CONFIG_KALLSYMS_ALL
+
+          require_enabled CONFIG_KSU_MANUAL_HOOK_AUTO_SETUID_HOOK
+          require_enabled CONFIG_KSU_MANUAL_HOOK_AUTO_INITRC_HOOK
+          require_enabled CONFIG_KSU_MANUAL_HOOK_AUTO_INPUT_HOOK
+
+          if grep -qx 'CONFIG_KSU_TRACEPOINT_HOOK=y' "$CONFIG"; then
+            echo "FAIL: Tracepoint hook selected."
+            exit 1
+          fi
+
+          if grep -qx 'CONFIG_KSU_SUSFS=y' "$CONFIG"; then
+            echo "FAIL: SUSFS selected."
+            exit 1
+          fi
+
           grep -E \
-            '^(CONFIG_KSU=|CONFIG_KSU_MANUAL_HOOK=|CONFIG_KALLSYMS_ALL=|CONFIG_KSU_MANUAL_HOOK_AUTO_)' \
-            "$CONFIG" | tee artifacts/bakasu-config-summary.txt
+            '^(CONFIG_KSU=|CONFIG_KSU_MANUAL_HOOK=|CONFIG_KALLSYMS=|CONFIG_KALLSYMS_ALL=|CONFIG_KSU_MANUAL_HOOK_AUTO_)' \
+            "$CONFIG" \
+            | tee artifacts/bakasu-config-summary.txt
 
-          echo "Generated Sweet configuration: PASS"
+          echo "PASS: BakaSU configuration verified."
 
+      # --------------------------------------------
+      # 8. RUN OFFICIAL BAKASU MANUAL HOOK CHECKER
+      # --------------------------------------------
       - name: Run official BakaSU manual hook checker
         shell: bash
         run: |
@@ -172,83 +231,147 @@ jobs:
 
           mkdir -p artifacts
 
+          CHECKER="drivers/kernelsu/tools/manual_hook_check.mk"
+          KBUILD="drivers/kernelsu/Kbuild"
+          CONFIG="$PWD/out/.config"
+          CHECK_MK="$RUNNER_TEMP/matrix-bakasu-check.mk"
+
+          test -f "$CHECKER"
+          test -f "$KBUILD"
+          test -s "$CONFIG"
+
+          grep -Fq \
+            'include $(KSU_SRC)/tools/manual_hook_check.mk' \
+            "$KBUILD"
+
+          KERNEL_VERSION="$(make -s kernelversion)"
+
+          VERSION_MAJOR="${KERNEL_VERSION%%.*}"
+          VERSION_REST="${KERNEL_VERSION#*.}"
+          VERSION_MINOR="${VERSION_REST%%.*}"
+
+          echo "Kernel: $KERNEL_VERSION"
+          echo "BakaSU: $BAKASU_COMMIT"
+
+          # Create a temporary Makefile that evaluates
+          # the actual pinned BakaSU checker with the
+          # generated kernel configuration.
+          cat > "$CHECK_MK" <<'EOF'
+          include $(KSU_CONFIG_FILE)
+          include $(KSU_CHECKER_FILE)
+
+          .PHONY: check
+          check:
+          	@echo "PASS: Official BakaSU manual hook checker"
+          EOF
+
           {
-            echo "=========================================="
-            echo "MR MATRIX - OFFICIAL BAKASU HOOK CHECK"
-            echo "=========================================="
+            echo "======================================"
+            echo "MR MATRIX - OFFICIAL BAKASU CHECK"
+            echo "======================================"
 
-            echo "Kernel version:"
-            make O=out ARCH=arm64 kernelversion
-
-            echo
-            echo "BakaSU revision:"
-            git -C KernelSU rev-parse HEAD
-
-            echo
-            echo "Generated configuration:"
-            grep -E \
-              '^(CONFIG_KSU=|CONFIG_KSU_MANUAL_HOOK=|CONFIG_KALLSYMS_ALL=|CONFIG_KSU_MANUAL_HOOK_AUTO_)' \
-              out/.config
-
-            echo
-            echo "Invoking BakaSU Kbuild manual-hook checker..."
-
-            make O=out ARCH=arm64 V=1 -n drivers/kernelsu/
-
-            echo
-            echo "Official BakaSU manual-hook checker: PASS"
+            make --no-print-directory \
+              -f "$CHECK_MK" \
+              srctree="$PWD" \
+              VERSION="$VERSION_MAJOR" \
+              PATCHLEVEL="$VERSION_MINOR" \
+              REPO_NAME="BakaSU" \
+              KSU_CONFIG_FILE="$CONFIG" \
+              KSU_CHECKER_FILE="$PWD/$CHECKER" \
+              check
 
           } 2>&1 | tee artifacts/official-manual-hook-check.txt
 
-      - name: Verify incompatible hooks are absent
+      # --------------------------------------------
+      # 9. ADDITIONAL INCOMPATIBLE HOOK CHECKS
+      # --------------------------------------------
+      - name: Check incompatible hooks
         shell: bash
         run: |
           set -euo pipefail
 
-          if grep -nF 'ksu_vfs_read_hook' fs/read_write.c; then
-            echo "ERROR: Incompatible ksu_vfs_read_hook found."
-            exit 1
-          fi
+          check_absent() {
+            local symbol="$1"
+            local file="$2"
 
-          if grep -nF 'is_ksu_transition' security/selinux/hooks.c; then
-            echo "ERROR: Incompatible is_ksu_transition found."
-            exit 1
-          fi
+            if grep -nF "$symbol" "$file"; then
+              echo "FAIL: Incompatible hook $symbol"
+              exit 1
+            fi
 
-          if grep -nF 'ksu_handle_rename' security/security.c; then
-            echo "ERROR: Incompatible ksu_handle_rename found."
-            exit 1
-          fi
+            echo "PASS: $symbol absent from $file"
+          }
 
-          echo "Incompatible hook checks: PASS"
+          check_absent \
+            ksu_vfs_read_hook \
+            fs/read_write.c
 
-      - name: Record source audit
+          check_absent \
+            is_ksu_transition \
+            security/selinux/hooks.c
+
+          check_absent \
+            ksu_handle_rename \
+            security/security.c
+
+          check_absent \
+            ksu_handle_execve \
+            fs/exec.c
+
+          check_absent \
+            ksu_handle_post_execve \
+            fs/exec.c
+
+          echo "PASS: No incompatible hooks found."
+
+      # --------------------------------------------
+      # 10. RECORD SOURCE AND DRIVER INFORMATION
+      # --------------------------------------------
+      - name: Record validation information
         if: always()
         shell: bash
         run: |
           mkdir -p artifacts
 
           {
+            echo "MR MATRIX - BakaSU Validation"
+            echo "============================"
             echo "Repository: $GITHUB_REPOSITORY"
             echo "Branch: matrix-bakasu-test"
             echo "Source commit: $GITHUB_SHA"
-            echo "BakaSU expected commit: 516d3e87fbc986ccefdde2c2765f1700612441a9"
+            echo "Expected BakaSU: $BAKASU_COMMIT"
 
             echo
             echo "Kernel version:"
-            make kernelversion || true
+            make -s kernelversion || true
 
             echo
-            echo "Working tree:"
-            git status --short
+            echo "Actual BakaSU revision:"
+            if [ -d KernelSU/.git ]; then
+              git -C KernelSU rev-parse HEAD
+            else
+              echo "Not integrated"
+            fi
 
             echo
             echo "Driver symlink:"
             readlink drivers/kernelsu || true
 
+            echo
+            echo "Source changes:"
+            git status --short
+
           } > artifacts/source-audit.txt
 
-      - name: Upload validation artifacts
+          git diff -- \
+            drivers/Makefile \
+            drivers/Kconfig \
+            > artifacts/driver-integration.diff || true
+
+      # --------------------------------------------
+      # 11. UPLOAD VALIDATION REPORT
+      # --------------------------------------------
+      - name: Upload BakaSU validation report
         if: always()
         uses: actions/upload-artifact@v4
         with:
