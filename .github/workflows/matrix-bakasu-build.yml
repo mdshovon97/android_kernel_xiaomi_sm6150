@@ -2,6 +2,10 @@
 name: MR MATRIX - Sweet BakaSU Kernel Build
 
 on:
+  push:
+    branches:
+      - matrix-bakasu-test
+
   workflow_dispatch:
 
 permissions:
