@@ -26,14 +26,22 @@ jobs:
       SUBARCH: arm64
       KERNEL_REPO: mdshovon97/android_kernel_xiaomi_sm6150
       KERNEL_BRANCH: matrix-bakasu-test
+
       BAKASU_COMMIT: 516d3e87fbc986ccefdde2c2765f1700612441a9
+
       CLANG_RELEASE: 06092026
+      CLANG_ASSET_ID: "546798216"
       CLANG_SHA256: 531083928c8e37f6b31e324dbfd0b5a8323f989b1c57ff2c1368b889b5b1bd30
+
       KERNEL_DIR: kernel
       KBUILD_BUILD_USER: MR_MATRIX
       KBUILD_BUILD_HOST: SWEET_BUILDER
 
     steps:
+      # --------------------------------------------------
+      # 1. CHECKOUT KERNEL SOURCE
+      # --------------------------------------------------
+
       - name: Checkout MR MATRIX kernel
         uses: actions/checkout@v4
         with:
@@ -41,6 +49,22 @@ jobs:
           ref: matrix-bakasu-test
           path: kernel
           fetch-depth: 1
+
+      - name: Record source information
+        shell: bash
+        working-directory: kernel
+        run: |
+          set -euo pipefail
+
+          echo "Kernel repository: $KERNEL_REPO"
+          echo "Kernel branch: $KERNEL_BRANCH"
+          echo "Kernel commit: $(git rev-parse HEAD)"
+
+          test "$(git branch --show-current)" = "$KERNEL_BRANCH"
+
+      # --------------------------------------------------
+      # 2. BUILD DEPENDENCIES
+      # --------------------------------------------------
 
       - name: Install build dependencies
         shell: bash
@@ -64,33 +88,63 @@ jobs:
             lld \
             make \
             python3 \
+            perl \
             unzip \
             zstd
+
+      # --------------------------------------------------
+      # 3. DOWNLOAD PINNED NEUTRON CLANG
+      # --------------------------------------------------
 
       - name: Download pinned Neutron Clang
         shell: bash
         run: |
           set -euo pipefail
 
-          URL="https://github.com/Neutron-Toolchains/clang-build-catalogue/releases/download/${CLANG_RELEASE}/neutron-clang-${CLANG_RELEASE}.tar.zst"
+          ASSET_URL="https://api.github.com/repos/Neutron-Toolchains/clang-build-catalogue/releases/assets/${CLANG_ASSET_ID}"
 
-          mkdir -p "$RUNNER_TEMP/toolchain"
+          TOOLCHAIN_DIR="$RUNNER_TEMP/toolchain"
+          ARCHIVE="$RUNNER_TEMP/neutron-clang.tar.zst"
 
-          curl -fL --retry 3 "$URL" \
-            -o "$RUNNER_TEMP/neutron-clang.tar.zst"
+          mkdir -p "$TOOLCHAIN_DIR"
 
-          echo "${CLANG_SHA256}  $RUNNER_TEMP/neutron-clang.tar.zst" \
+          echo "Downloading Neutron Clang $CLANG_RELEASE"
+
+          curl -fL \
+            --retry 3 \
+            --retry-delay 5 \
+            --connect-timeout 30 \
+            -H "Accept: application/octet-stream" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "$ASSET_URL" \
+            -o "$ARCHIVE"
+
+          echo "Verifying compiler archive..."
+
+          echo "${CLANG_SHA256}  ${ARCHIVE}" \
             | sha256sum -c -
 
+          echo "Extracting compiler..."
+
           tar --zstd \
-            -xf "$RUNNER_TEMP/neutron-clang.tar.zst" \
-            -C "$RUNNER_TEMP/toolchain"
+            -xf "$ARCHIVE" \
+            -C "$TOOLCHAIN_DIR"
 
-          test -x "$RUNNER_TEMP/toolchain/bin/clang"
+          if [ ! -x "$TOOLCHAIN_DIR/bin/clang" ]; then
+            echo "ERROR: clang executable not found."
+            find "$TOOLCHAIN_DIR" -maxdepth 4 -name clang -print
+            exit 1
+          fi
 
-          echo "$RUNNER_TEMP/toolchain/bin" >> "$GITHUB_PATH"
+          echo "$TOOLCHAIN_DIR/bin" >> "$GITHUB_PATH"
 
-          clang --version || true
+          "$TOOLCHAIN_DIR/bin/clang" --version
+
+          echo "PASS: Neutron Clang installed."
+
+      # --------------------------------------------------
+      # 4. PINNED BAKASU INTEGRATION
+      # --------------------------------------------------
 
       - name: Integrate pinned BakaSU
         shell: bash
@@ -98,11 +152,24 @@ jobs:
         run: |
           set -euo pipefail
 
-          curl -fL --retry 3 \
-            "https://raw.githubusercontent.com/Baka-SU/BakaSU/${BAKASU_COMMIT}/kernel/setup.sh" \
-            -o "$RUNNER_TEMP/bakasu-setup.sh"
+          SETUP_SCRIPT="$RUNNER_TEMP/bakasu-setup.sh"
 
-          sh "$RUNNER_TEMP/bakasu-setup.sh" "$BAKASU_COMMIT"
+          curl -fL \
+            --retry 3 \
+            "https://raw.githubusercontent.com/Baka-SU/BakaSU/${BAKASU_COMMIT}/kernel/setup.sh" \
+            -o "$SETUP_SCRIPT"
+
+          echo "Checking BakaSU setup script..."
+
+          sh -n "$SETUP_SCRIPT"
+
+          echo "Integrating pinned BakaSU..."
+
+          sh "$SETUP_SCRIPT" "$BAKASU_COMMIT"
+
+          test -d KernelSU/.git
+          test -L drivers/kernelsu
+          test -d drivers/kernelsu
 
           ACTUAL="$(git -C KernelSU rev-parse HEAD)"
 
@@ -110,10 +177,18 @@ jobs:
           echo "Actual BakaSU:   $ACTUAL"
 
           test "$ACTUAL" = "$BAKASU_COMMIT"
-          test -L drivers/kernelsu
-          test -d drivers/kernelsu
 
-          echo "PASS: Pinned BakaSU integrated."
+          grep -Fq 'obj-$(CONFIG_KSU) += kernelsu/' \
+            drivers/Makefile
+
+          grep -Fq 'source "drivers/kernelsu/Kconfig"' \
+            drivers/Kconfig
+
+          echo "PASS: Pinned BakaSU integration."
+
+      # --------------------------------------------------
+      # 5. GENERATE SWEET DEFCONFIG
+      # --------------------------------------------------
 
       - name: Generate Sweet configuration
         shell: bash
@@ -123,14 +198,18 @@ jobs:
 
           mkdir -p out artifacts
 
+          echo "Generating sweet_defconfig..."
+
           make O=out ARCH=arm64 \
-            LLVM=1 LLVM_IAS=1 \
+            CC=clang \
             CROSS_COMPILE=aarch64-linux-gnu- \
             CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
             sweet_defconfig
 
+          echo "Running olddefconfig..."
+
           make O=out ARCH=arm64 \
-            LLVM=1 LLVM_IAS=1 \
+            CC=clang \
             CROSS_COMPILE=aarch64-linux-gnu- \
             CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
             olddefconfig
@@ -139,29 +218,40 @@ jobs:
 
           test -s "$CONFIG"
 
+          echo "Checking required configuration..."
+
           for OPTION in \
             CONFIG_KSU \
             CONFIG_KSU_MANUAL_HOOK \
             CONFIG_KALLSYMS \
-            CONFIG_KALLSYMS_ALL
+            CONFIG_KALLSYMS_ALL \
+            CONFIG_DEBUG_KERNEL
           do
-            grep -qx "${OPTION}=y" "$CONFIG"
+            if ! grep -qx "${OPTION}=y" "$CONFIG"; then
+              echo "FAIL: ${OPTION} is not enabled."
+              exit 1
+            fi
+
             echo "PASS: ${OPTION}=y"
           done
 
           if grep -qx 'CONFIG_KSU_TRACEPOINT_HOOK=y' "$CONFIG"; then
-            echo "FAIL: Tracepoint hook enabled"
+            echo "FAIL: Tracepoint hook selected."
             exit 1
           fi
 
           if grep -qx 'CONFIG_KSU_SUSFS=y' "$CONFIG"; then
-            echo "FAIL: SUSFS enabled in Phase 1"
+            echo "FAIL: SUSFS selected in Phase 1."
             exit 1
           fi
 
           cp "$CONFIG" artifacts/generated-sweet.config
 
           echo "PASS: Sweet configuration generated."
+
+      # --------------------------------------------------
+      # 6. OFFICIAL BAKASU MANUAL HOOK CHECKER
+      # --------------------------------------------------
 
       - name: Verify official BakaSU manual hooks
         shell: bash
@@ -170,27 +260,36 @@ jobs:
           set -euo pipefail
 
           CHECKER="drivers/kernelsu/tools/manual_hook_check.mk"
-          KBUILD="drivers/kernelsu/Kbuild"
+
           CONFIG="$PWD/out/.config"
           CHECK_MK="$RUNNER_TEMP/matrix-check.mk"
 
+          mkdir -p artifacts
+
           test -f "$CHECKER"
-          test -f "$KBUILD"
           test -s "$CONFIG"
 
           KERNEL_VERSION="$(make -s kernelversion)"
+
           VERSION_MAJOR="${KERNEL_VERSION%%.*}"
+
           VERSION_REST="${KERNEL_VERSION#*.}"
           VERSION_MINOR="${VERSION_REST%%.*}"
+
+          echo "Kernel version: $KERNEL_VERSION"
 
           cat > "$CHECK_MK" <<'EOF'
           include $(KSU_CONFIG_FILE)
           include $(KSU_CHECKER_FILE)
 
+          .DEFAULT_GOAL := check
+
           .PHONY: check
           check:
           	@echo "PASS: Official BakaSU manual-hook checker"
           EOF
+
+          set -o pipefail
 
           make --no-print-directory \
             -f "$CHECK_MK" \
@@ -200,7 +299,14 @@ jobs:
             REPO_NAME="BakaSU" \
             KSU_CONFIG_FILE="$CONFIG" \
             KSU_CHECKER_FILE="$PWD/$CHECKER" \
-            check 2>&1 | tee artifacts/manual-hook-check.log
+            check \
+            2>&1 | tee artifacts/manual-hook-check.log
+
+          echo "PASS: BakaSU manual-hook validation."
+
+      # --------------------------------------------------
+      # 7. COMPILE SWEET KERNEL
+      # --------------------------------------------------
 
       - name: Compile Sweet kernel
         shell: bash
@@ -208,11 +314,11 @@ jobs:
         run: |
           set -euo pipefail
 
+          mkdir -p artifacts
+
           MAKE_ARGS=(
             ARCH=arm64
-            LLVM=1
-            LLVM_IAS=1
-            LD=ld.lld
+            CC=clang
             CROSS_COMPILE=aarch64-linux-gnu-
             CROSS_COMPILE_ARM32=arm-linux-gnueabi-
           )
@@ -220,7 +326,10 @@ jobs:
           echo "Kernel version:"
           make -s kernelversion
 
-          echo "Starting ARM64 kernel compilation..."
+          echo "Compiler:"
+          clang --version
+
+          echo "Starting Sweet ARM64 compilation..."
 
           set -o pipefail
 
@@ -232,7 +341,10 @@ jobs:
 
           IMAGE="out/arch/arm64/boot/Image.gz"
 
-          test -s "$IMAGE"
+          if [ ! -s "$IMAGE" ]; then
+            echo "FAIL: Image.gz was not generated."
+            exit 1
+          fi
 
           cp "$IMAGE" artifacts/Image.gz
 
@@ -241,7 +353,11 @@ jobs:
               -C out/arch/arm64/boot dts
           fi
 
-          echo "PASS: Kernel image generated."
+          echo "PASS: Sweet kernel image generated."
+
+      # --------------------------------------------------
+      # 8. BUILD INFORMATION
+      # --------------------------------------------------
 
       - name: Record build information
         if: always()
@@ -252,16 +368,32 @@ jobs:
 
           {
             echo "MR MATRIX - Sweet BakaSU Build"
+            echo "Kernel repository: $KERNEL_REPO"
             echo "Kernel branch: $KERNEL_BRANCH"
             echo "Kernel commit: $(git rev-parse HEAD)"
             echo "BakaSU commit: $BAKASU_COMMIT"
             echo "Clang release: $CLANG_RELEASE"
             echo "Kernel version: $(make -s kernelversion || true)"
+
             echo
-            echo "Build configuration:"
-            grep -E '^(CONFIG_KSU=|CONFIG_KSU_MANUAL_HOOK=|CONFIG_KALLSYMS=|CONFIG_KALLSYMS_ALL=)' \
-              out/.config || true
+            echo "Configuration:"
+
+            if [ -s out/.config ]; then
+              grep -E \
+                '^(CONFIG_KSU=|CONFIG_KSU_MANUAL_HOOK=|CONFIG_KALLSYMS=|CONFIG_KALLSYMS_ALL=|CONFIG_DEBUG_KERNEL=)' \
+                out/.config || true
+            else
+              echo "Configuration not generated."
+            fi
+
+            echo
+            echo "Build result: ${{ job.status }}"
+
           } > artifacts/build-info.txt
+
+      # --------------------------------------------------
+      # 9. UPLOAD BUILD ARTIFACTS
+      # --------------------------------------------------
 
       - name: Upload build artifacts
         if: always()
