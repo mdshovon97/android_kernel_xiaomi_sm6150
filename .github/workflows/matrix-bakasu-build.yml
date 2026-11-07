@@ -24,6 +24,7 @@ jobs:
     env:
       ARCH: arm64
       SUBARCH: arm64
+
       KERNEL_REPO: mdshovon97/android_kernel_xiaomi_sm6150
       KERNEL_BRANCH: matrix-bakasu-test
 
@@ -34,6 +35,7 @@ jobs:
       CLANG_SHA256: 531083928c8e37f6b31e324dbfd0b5a8323f989b1c57ff2c1368b889b5b1bd30
 
       KERNEL_DIR: kernel
+
       KBUILD_BUILD_USER: MR_MATRIX
       KBUILD_BUILD_HOST: SWEET_BUILDER
 
@@ -60,10 +62,10 @@ jobs:
           echo "Kernel branch: $KERNEL_BRANCH"
           echo "Kernel commit: $(git rev-parse HEAD)"
 
-          test "$(git branch --show-current)" = "$KERNEL_BRANCH"
+          git log -1 --oneline
 
       # --------------------------------------------------
-      # 2. BUILD DEPENDENCIES
+      # 2. INSTALL BUILD DEPENDENCIES
       # --------------------------------------------------
 
       - name: Install build dependencies
@@ -92,6 +94,12 @@ jobs:
             unzip \
             zstd
 
+          echo "Checking ARM64 linker:"
+          command -v aarch64-linux-gnu-ld
+
+          echo "Checking ARM32 compatibility linker:"
+          command -v arm-linux-gnueabi-ld
+
       # --------------------------------------------------
       # 3. DOWNLOAD PINNED NEUTRON CLANG
       # --------------------------------------------------
@@ -119,7 +127,7 @@ jobs:
             "$ASSET_URL" \
             -o "$ARCHIVE"
 
-          echo "Verifying compiler archive..."
+          echo "Verifying compiler checksum..."
 
           echo "${CLANG_SHA256}  ${ARCHIVE}" \
             | sha256sum -c -
@@ -131,8 +139,13 @@ jobs:
             -C "$TOOLCHAIN_DIR"
 
           if [ ! -x "$TOOLCHAIN_DIR/bin/clang" ]; then
-            echo "ERROR: clang executable not found."
-            find "$TOOLCHAIN_DIR" -maxdepth 4 -name clang -print
+            echo "ERROR: Clang executable not found."
+
+            find "$TOOLCHAIN_DIR" \
+              -maxdepth 4 \
+              -name clang \
+              -print
+
             exit 1
           fi
 
@@ -143,7 +156,7 @@ jobs:
           echo "PASS: Neutron Clang installed."
 
       # --------------------------------------------------
-      # 4. PINNED BAKASU INTEGRATION
+      # 4. INTEGRATE PINNED BAKASU
       # --------------------------------------------------
 
       - name: Integrate pinned BakaSU
@@ -156,10 +169,11 @@ jobs:
 
           curl -fL \
             --retry 3 \
+            --retry-delay 5 \
             "https://raw.githubusercontent.com/Baka-SU/BakaSU/${BAKASU_COMMIT}/kernel/setup.sh" \
             -o "$SETUP_SCRIPT"
 
-          echo "Checking BakaSU setup script..."
+          echo "Checking setup script syntax..."
 
           sh -n "$SETUP_SCRIPT"
 
@@ -178,16 +192,18 @@ jobs:
 
           test "$ACTUAL" = "$BAKASU_COMMIT"
 
-          grep -Fq 'obj-$(CONFIG_KSU) += kernelsu/' \
+          grep -Fq \
+            'obj-$(CONFIG_KSU) += kernelsu/' \
             drivers/Makefile
 
-          grep -Fq 'source "drivers/kernelsu/Kconfig"' \
+          grep -Fq \
+            'source "drivers/kernelsu/Kconfig"' \
             drivers/Kconfig
 
           echo "PASS: Pinned BakaSU integration."
 
       # --------------------------------------------------
-      # 5. GENERATE SWEET DEFCONFIG
+      # 5. GENERATE SWEET CONFIGURATION
       # --------------------------------------------------
 
       - name: Generate Sweet configuration
@@ -198,27 +214,31 @@ jobs:
 
           mkdir -p out artifacts
 
+          COMMON_ARGS=(
+            ARCH=arm64
+            CC=clang
+            CROSS_COMPILE=aarch64-linux-gnu-
+            CROSS_COMPILE_ARM32=arm-linux-gnueabi-
+            CROSS_COMPILE_COMPAT=arm-linux-gnueabi-
+          )
+
           echo "Generating sweet_defconfig..."
 
-          make O=out ARCH=arm64 \
-            CC=clang \
-            CROSS_COMPILE=aarch64-linux-gnu- \
-            CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
+          make O=out \
+            "${COMMON_ARGS[@]}" \
             sweet_defconfig
 
           echo "Running olddefconfig..."
 
-          make O=out ARCH=arm64 \
-            CC=clang \
-            CROSS_COMPILE=aarch64-linux-gnu- \
-            CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
+          make O=out \
+            "${COMMON_ARGS[@]}" \
             olddefconfig
 
           CONFIG="out/.config"
 
           test -s "$CONFIG"
 
-          echo "Checking required configuration..."
+          echo "Checking required BakaSU configuration..."
 
           for OPTION in \
             CONFIG_KSU \
@@ -250,7 +270,7 @@ jobs:
           echo "PASS: Sweet configuration generated."
 
       # --------------------------------------------------
-      # 6. OFFICIAL BAKASU MANUAL HOOK CHECKER
+      # 6. OFFICIAL BAKASU MANUAL-HOOK CHECKER
       # --------------------------------------------------
 
       - name: Verify official BakaSU manual hooks
@@ -305,7 +325,30 @@ jobs:
           echo "PASS: BakaSU manual-hook validation."
 
       # --------------------------------------------------
-      # 7. COMPILE SWEET KERNEL
+      # 7. VERIFY TOOLCHAIN SELECTION
+      # --------------------------------------------------
+
+      - name: Verify ARM64 and ARM32 toolchains
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "Clang:"
+          command -v clang
+          clang --version
+
+          echo "ARM64 linker:"
+          command -v aarch64-linux-gnu-ld
+          aarch64-linux-gnu-ld --version
+
+          echo "ARM32 compatibility linker:"
+          command -v arm-linux-gnueabi-ld
+          arm-linux-gnueabi-ld --version
+
+          echo "PASS: Required toolchains available."
+
+      # --------------------------------------------------
+      # 8. COMPILE SWEET KERNEL
       # --------------------------------------------------
 
       - name: Compile Sweet kernel
@@ -321,6 +364,7 @@ jobs:
             CC=clang
             CROSS_COMPILE=aarch64-linux-gnu-
             CROSS_COMPILE_ARM32=arm-linux-gnueabi-
+            CROSS_COMPILE_COMPAT=arm-linux-gnueabi-
           )
 
           echo "Kernel version:"
@@ -328,6 +372,12 @@ jobs:
 
           echo "Compiler:"
           clang --version
+
+          echo "ARM64 linker:"
+          aarch64-linux-gnu-ld --version
+
+          echo "ARM32 compatibility linker:"
+          arm-linux-gnueabi-ld --version
 
           echo "Starting Sweet ARM64 compilation..."
 
@@ -356,7 +406,7 @@ jobs:
           echo "PASS: Sweet kernel image generated."
 
       # --------------------------------------------------
-      # 8. BUILD INFORMATION
+      # 9. RECORD BUILD INFORMATION
       # --------------------------------------------------
 
       - name: Record build information
@@ -368,10 +418,12 @@ jobs:
 
           {
             echo "MR MATRIX - Sweet BakaSU Build"
+
             echo "Kernel repository: $KERNEL_REPO"
             echo "Kernel branch: $KERNEL_BRANCH"
             echo "Kernel commit: $(git rev-parse HEAD)"
             echo "BakaSU commit: $BAKASU_COMMIT"
+
             echo "Clang release: $CLANG_RELEASE"
             echo "Kernel version: $(make -s kernelversion || true)"
 
@@ -392,7 +444,7 @@ jobs:
           } > artifacts/build-info.txt
 
       # --------------------------------------------------
-      # 9. UPLOAD BUILD ARTIFACTS
+      # 10. UPLOAD BUILD ARTIFACTS
       # --------------------------------------------------
 
       - name: Upload build artifacts
