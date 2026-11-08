@@ -1,0 +1,118 @@
+
+name: MR MATRIX - DroidSpace Kconfig Validation
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - matrix-droidspace-config
+    paths:
+      - "arch/arm64/configs/sweet_defconfig"
+      - "kernel/**"
+      - "net/**"
+      - "fs/**"
+      - ".github/workflows/matrix-droidspace-config-check.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  config-check:
+    name: Resolve Sweet DroidSpace configuration
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+        with:
+          ref: matrix-droidspace-config
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            bc bison build-essential flex \
+            libelf-dev libncurses-dev libssl-dev \
+            python3
+
+      - name: Check kernel source
+        run: |
+          set -euo pipefail
+          echo "Kernel version:"
+          make kernelversion
+          test -f arch/arm64/configs/sweet_defconfig
+
+      - name: Generate resolved configuration
+        run: |
+          set -euo pipefail
+          mkdir -p out artifacts
+
+          make O=out ARCH=arm64 sweet_defconfig
+          make O=out ARCH=arm64 olddefconfig
+
+          test -s out/.config
+          cp out/.config artifacts/sweet-resolved.config
+
+      - name: Verify DroidSpace options
+        shell: bash
+        run: |
+          set -euo pipefail
+          CONFIG=out/.config
+          FAILED=0
+
+          REQUIRED=(
+            CONFIG_SYSCTL
+            CONFIG_SYSVIPC
+            CONFIG_POSIX_MQUEUE
+            CONFIG_NAMESPACES
+            CONFIG_PID_NS
+            CONFIG_UTS_NS
+            CONFIG_IPC_NS
+            CONFIG_USER_NS
+            CONFIG_NET_NS
+            CONFIG_SECCOMP
+            CONFIG_SECCOMP_FILTER
+            CONFIG_CGROUPS
+            CONFIG_CGROUP_DEVICE
+            CONFIG_CGROUP_PIDS
+            CONFIG_OVERLAY_FS
+            CONFIG_DEVTMPFS
+            CONFIG_VETH
+            CONFIG_BRIDGE
+            CONFIG_BRIDGE_NETFILTER
+            CONFIG_NF_CT_NETLINK
+            CONFIG_IP6_NF_NAT
+            CONFIG_NF_NAT_IPV6
+          )
+
+          for SYMBOL in "${REQUIRED[@]}"; do
+            if grep -qx "${SYMBOL}=y" "$CONFIG"; then
+              echo "PASS: ${SYMBOL}=y"
+            else
+              echo "FAIL: ${SYMBOL}"
+              FAILED=1
+            fi
+          done
+
+          echo
+          echo "IPv6 NAT resolved configuration:"
+          grep -E '^(CONFIG_IP6_NF_NAT|CONFIG_NF_NAT_IPV6|CONFIG_NF_CONNTRACK_IPV6|CONFIG_IP6_NF_TARGET_MASQUERADE)=' "$CONFIG" || true
+
+          cp "$CONFIG" artifacts/sweet-resolved.config
+
+          if [ "$FAILED" -ne 0 ]; then
+            echo "DroidSpace configuration validation FAILED."
+            exit 1
+          fi
+
+          echo "DroidSpace configuration validation PASSED."
+
+      - name: Upload configuration report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: MR-MATRIX-DroidSpace-Kconfig-Report
+          path: artifacts/
+          if-no-files-found: warn
+          retention-days: 14
