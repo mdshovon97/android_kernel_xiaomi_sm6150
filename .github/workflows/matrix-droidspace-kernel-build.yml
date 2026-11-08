@@ -133,32 +133,24 @@ jobs:
           )"
 
           RELEASE_TAG="$(
-            echo "$RELEASE_JSON" \
-              | jq -r '.tag_name // "unknown"'
+            echo "$RELEASE_JSON" | jq -r '.tag_name'
           )"
 
           DOWNLOAD_URL="$(
-            echo "$RELEASE_JSON" \
-              | jq -r '
-                  [.assets[]
-                  | select(.name | endswith(".tar.zst"))]
-                  | first
-                  | .browser_download_url // empty
-                '
+            echo "$RELEASE_JSON" | jq -r '
+              [.assets[]
+              | select(.name | endswith(".tar.zst"))]
+              | first
+              | .browser_download_url // empty
+            '
           )"
 
-          if [ -z "$DOWNLOAD_URL" ]; then
-            echo "ERROR: Neutron Clang archive not found."
-
-            echo "$RELEASE_JSON" \
-              | jq -r '.assets[].name'
-
+          test -n "$DOWNLOAD_URL" || {
+            echo "ERROR: Toolchain download URL unavailable."
             exit 1
-          fi
+          }
 
-          echo "Clang release: $RELEASE_TAG"
-
-          echo "Downloading toolchain..."
+          echo "Neutron Clang: $RELEASE_TAG"
 
           curl -fL \
             --retry 5 \
@@ -178,23 +170,30 @@ jobs:
             -xf "$ARCHIVE" \
             -C "$TOOLCHAIN_DIR"
 
-          CLANG_PATH="$(
-            find "$TOOLCHAIN_DIR" \
-              -type f \
-              -path '*/bin/clang' \
-              -print -quit
-          )"
+          CLANG_BIN="$TOOLCHAIN_DIR/bin"
 
-          if [ -z "$CLANG_PATH" ]; then
-            echo "ERROR: Clang executable not found."
-            find "$TOOLCHAIN_DIR" -maxdepth 5 -print
+          echo "Checking extracted compiler..."
+
+          if [ ! -x "$CLANG_BIN/clang" ]; then
+            echo "ERROR: clang executable missing or not executable."
+
+            ls -lah "$CLANG_BIN"
+
+            echo "Searching for clang alternatives..."
+
+            find "$TOOLCHAIN_DIR" \
+              \( -type f -o -type l \) \
+              -name 'clang*' \
+              -print
+
             exit 1
           fi
 
-          CLANG_BIN="$(dirname "$CLANG_PATH")"
+          echo "Checking LLVM tools..."
 
           REQUIRED_TOOLS=(
             clang
+            clang++
             ld.lld
             llvm-ar
             llvm-nm
@@ -205,24 +204,25 @@ jobs:
           )
 
           for TOOL in "${REQUIRED_TOOLS[@]}"; do
+
             if [ ! -x "$CLANG_BIN/$TOOL" ]; then
-              echo "ERROR: Missing LLVM tool: $TOOL"
+              echo "ERROR: Missing executable: $TOOL"
               exit 1
             fi
+
+            echo "PASS: $TOOL"
           done
 
           echo "$CLANG_BIN" >> "$GITHUB_PATH"
 
           echo "$RELEASE_TAG" \
-            > artifacts/clang-release.txt
+            > "$GITHUB_WORKSPACE/artifacts-clang-release.txt"
 
-          "$CLANG_BIN/clang" --version \
-            > artifacts/clang-version.txt
+          "$CLANG_BIN/clang" --version
 
-          "$CLANG_BIN/ld.lld" --version \
-            > artifacts/lld-version.txt
+          "$CLANG_BIN/ld.lld" --version
 
-          echo "PASS: Neutron Clang ready."
+          echo "PASS: Neutron Clang installation verified."
 
       # --------------------------------------------------
       # 4. VERIFY EXISTING BAKASU INTEGRATION
