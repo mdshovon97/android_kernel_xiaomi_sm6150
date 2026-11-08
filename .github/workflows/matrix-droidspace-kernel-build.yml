@@ -380,7 +380,6 @@ jobs:
             CONFIG_CGROUP_NET_PRIO
             CONFIG_MEMCG
             CONFIG_MEMCG_SWAP
-            CONFIG_CFS_BANDWIDTH
             CONFIG_CGROUP_PIDS
             CONFIG_CGROUP_CPUACCT
 
