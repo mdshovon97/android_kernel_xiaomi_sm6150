@@ -42,6 +42,9 @@ jobs:
       CLANG_ASSET_ID: "546798216"
       CLANG_SHA256: "531083928c8e37f6b31e324dbfd0b5a8323f989b1c57ff2c1368b889b5b1bd30"
 
+      ANYKERNEL_REPO: https://github.com/riarumoda/AnyKernel3.git
+      ANYKERNEL_COMMIT: e1b0dc4ef8606c70b29a4ef33459404af3d9d71d
+
       KBUILD_BUILD_USER: MR_MATRIX
       KBUILD_BUILD_HOST: SWEET_DROIDSPACE
 
@@ -155,8 +158,6 @@ jobs:
           echo "${CLANG_SHA256}  ${ARCHIVE}" \
             | sha256sum -c -
 
-          echo "Testing archive..."
-
           zstd -t "$ARCHIVE"
 
           echo "Extracting toolchain..."
@@ -220,15 +221,11 @@ jobs:
             "https://raw.githubusercontent.com/Baka-SU/BakaSU/${BAKASU_COMMIT}/kernel/setup.sh" \
             -o "$SETUP_SCRIPT"
 
-          echo "Checking setup script syntax..."
-
           sh -n "$SETUP_SCRIPT"
 
-          echo "Integrating BakaSU commit: $BAKASU_COMMIT"
+          echo "Integrating BakaSU: $BAKASU_COMMIT"
 
           sh "$SETUP_SCRIPT" "$BAKASU_COMMIT"
-
-          echo "Verifying BakaSU checkout..."
 
           test -d KernelSU/.git
 
@@ -239,8 +236,6 @@ jobs:
 
           test "$ACTUAL_COMMIT" = "$BAKASU_COMMIT"
 
-          echo "Verifying BakaSU symbolic link..."
-
           test -L drivers/kernelsu
           test -d drivers/kernelsu
 
@@ -248,10 +243,10 @@ jobs:
           test -f drivers/kernelsu/Makefile
           test -f drivers/kernelsu/tools/manual_hook_check.mk
 
-          echo "PASS: BakaSU source and symbolic link verified."
+          echo "PASS: BakaSU integration verified."
 
       # --------------------------------------------------
-      # 5. VERIFY BAKASU SOURCE REGISTRATION
+      # 5. VERIFY BAKASU REGISTRATION
       # --------------------------------------------------
 
       - name: Verify BakaSU Kconfig and Makefile
@@ -259,23 +254,13 @@ jobs:
         run: |
           set -euo pipefail
 
-          echo "Checking drivers/Kconfig..."
-
           grep -Fq \
             'source "drivers/kernelsu/Kconfig"' \
             drivers/Kconfig
 
-          echo "PASS: BakaSU Kconfig registered."
-
-          echo "Checking drivers/Makefile..."
-
           grep -Fq \
             'obj-$(CONFIG_KSU) += kernelsu/' \
             drivers/Makefile
-
-          echo "PASS: BakaSU Makefile registered."
-
-          echo "Checking duplicate registration..."
 
           KCONFIG_COUNT="$(
             grep -Fc \
@@ -292,7 +277,7 @@ jobs:
           test "$KCONFIG_COUNT" -eq 1
           test "$MAKEFILE_COUNT" -eq 1
 
-          echo "PASS: BakaSU registration is unique."
+          echo "PASS: Unique BakaSU registration."
 
       # --------------------------------------------------
       # 6. GENERATE SWEET CONFIGURATION
@@ -330,7 +315,7 @@ jobs:
           CONFIG="out/.config"
 
           if [ ! -s "$CONFIG" ]; then
-            echo "ERROR: Sweet configuration missing."
+            echo "ERROR: Configuration missing."
             exit 1
           fi
 
@@ -340,7 +325,7 @@ jobs:
           echo "PASS: Sweet configuration generated."
 
       # --------------------------------------------------
-      # 7. VERIFY BAKASU AND DROIDSPACE OPTIONS
+      # 7. VERIFY BAKASU AND DROIDSPACE
       # --------------------------------------------------
 
       - name: Verify BakaSU and DroidSpace configuration
@@ -423,17 +408,15 @@ jobs:
             CONFIG_TUN
           )
 
-          echo "Checking mandatory configuration..."
+          echo "Checking mandatory options..."
 
           for SYMBOL in "${REQUIRED[@]}"; do
-
             if grep -qx "${SYMBOL}=y" "$CONFIG"; then
               echo "PASS: ${SYMBOL}=y"
             else
               echo "FAIL: ${SYMBOL}"
               FAILED=1
             fi
-
           done
 
           echo
@@ -441,23 +424,31 @@ jobs:
 
           if grep -qx \
             'CONFIG_KSU_TRACEPOINT_HOOK=y' "$CONFIG"; then
-
             echo "FAIL: Tracepoint hook selected."
             FAILED=1
-
           else
-            echo "PASS: Tracepoint hook not selected."
+            echo "PASS: Manual hook selection."
           fi
 
           echo
-          echo "Checking resolved namespace and container options..."
+          echo "Checking CFS bandwidth..."
+
+          if grep -qx 'CONFIG_CFS_BANDWIDTH=y' "$CONFIG"; then
+            echo "FAIL: CFS bandwidth unexpectedly enabled."
+            FAILED=1
+          else
+            echo "PASS: CFS bandwidth disabled."
+          fi
+
+          echo
+          echo "Resolved configuration:"
 
           grep -E \
-            '^(CONFIG_KSU=|CONFIG_KSU_MANUAL_HOOK=|CONFIG_USER_NS=|CONFIG_PID_NS=|CONFIG_IPC_NS=|CONFIG_NET_NS=|CONFIG_SECCOMP=|CONFIG_SECCOMP_FILTER=|CONFIG_CGROUPS=|CONFIG_OVERLAY_FS=)' \
+            '^(CONFIG_KSU=|CONFIG_KSU_MANUAL_HOOK=|CONFIG_USER_NS=|CONFIG_PID_NS=|CONFIG_IPC_NS=|CONFIG_NET_NS=|CONFIG_SECCOMP=|CONFIG_SECCOMP_FILTER=|CONFIG_CGROUPS=|CONFIG_CGROUP_SCHED=|CONFIG_FAIR_GROUP_SCHED=|CONFIG_CFS_BANDWIDTH=|CONFIG_OVERLAY_FS=|CONFIG_SCHED_WALT=)' \
             "$CONFIG" || true
 
           echo
-          echo "IPv6 NAT configuration..."
+          echo "IPv6 NAT configuration:"
 
           grep -E \
             '^(CONFIG_IP6_NF_NAT=|CONFIG_IP6_NF_TARGET_MASQUERADE=|CONFIG_NF_NAT_IPV6=|CONFIG_NF_CONNTRACK_IPV6=)' \
@@ -495,7 +486,6 @@ jobs:
           KERNEL_VERSION="$(make -s kernelversion)"
 
           VERSION_MAJOR="${KERNEL_VERSION%%.*}"
-
           VERSION_REST="${KERNEL_VERSION#*.}"
           VERSION_MINOR="${VERSION_REST%%.*}"
 
@@ -525,7 +515,7 @@ jobs:
             check \
             2>&1 | tee artifacts/manual-hook-check.log
 
-          echo "PASS: Official BakaSU manual-hook validation."
+          echo "PASS: BakaSU manual-hook validation."
 
       # --------------------------------------------------
       # 9. VERIFY BUILD TOOLCHAINS
@@ -536,32 +526,25 @@ jobs:
         run: |
           set -euo pipefail
 
-          echo "Neutron Clang:"
           command -v clang
           clang --version
 
-          echo
-          echo "LLVM linker:"
           command -v ld.lld
           ld.lld --version
 
-          echo
-          echo "ARM64 linker:"
           command -v aarch64-linux-gnu-ld
           aarch64-linux-gnu-ld --version
 
-          echo
-          echo "ARM32 linker:"
           command -v arm-linux-gnueabi-ld
           arm-linux-gnueabi-ld --version
 
-          echo "PASS: All build toolchains verified."
+          echo "PASS: Build toolchains verified."
 
       # --------------------------------------------------
-      # 10. COMPILE SWEET KERNEL
+      # 10. COMPILE SWEET KERNEL AND DEVICE TREES
       # --------------------------------------------------
 
-      - name: Compile Sweet kernel
+      - name: Compile Sweet kernel and DTBs
         shell: bash
         run: |
           set -euo pipefail
@@ -587,8 +570,7 @@ jobs:
           echo "Kernel: $(make -s kernelversion)"
           echo "Device: Sweet / Sweetin"
           echo "Architecture: ARM64"
-          echo "Compiler: Pinned Neutron Clang"
-          echo "Linker: LLD"
+          echo "Compiler: Neutron Clang"
           echo "Build jobs: $JOBS"
 
           set -o pipefail
@@ -601,14 +583,26 @@ jobs:
 
           IMAGE="out/arch/arm64/boot/Image.gz"
           BOOT_DIR="out/arch/arm64/boot"
+          QCOM_DTS="$BOOT_DIR/dts/qcom"
 
-          if [ ! -s "$IMAGE" ]; then
-            echo "ERROR: Image.gz missing."
-            exit 1
-          fi
+          test -s "$IMAGE"
 
           cp "$IMAGE" \
             artifacts/kernel-output/Image.gz
+
+          echo "Checking Sweet device-tree outputs..."
+
+          DTB="$QCOM_DTS/xiaomi-sdmmagpie.dtb"
+          DTBO="$QCOM_DTS/sweet-sdmmagpie-overlay.dtbo"
+
+          test -s "$DTB"
+          test -s "$DTBO"
+
+          cp "$DTB" \
+            artifacts/kernel-output/xiaomi-sdmmagpie.dtb
+
+          cp "$DTBO" \
+            artifacts/kernel-output/sweet-sdmmagpie-overlay.dtbo
 
           if [ -s "$BOOT_DIR/dtb.img" ]; then
             cp "$BOOT_DIR/dtb.img" \
@@ -620,29 +614,28 @@ jobs:
               artifacts/kernel-output/
           fi
 
-          if [ -d "$BOOT_DIR/dts" ]; then
-            tar -czf \
-              artifacts/kernel-output/dts.tar.gz \
-              -C "$BOOT_DIR" dts
-          fi
-
-          find "$BOOT_DIR" \
-            -maxdepth 4 \
+          find "$BOOT_DIR/dts" \
             -type f \
-            -name '*.dtb' \
+            \( -name '*.dtb' -o -name '*.dtbo' \) \
             -print \
-            > artifacts/kernel-output/dtb-files.txt
+            > artifacts/kernel-output/device-tree-files.txt
+
+          tar -czf \
+            artifacts/kernel-output/dts.tar.gz \
+            -C "$BOOT_DIR" dts
 
           sha256sum \
             artifacts/kernel-output/Image.gz \
-            > artifacts/kernel-output/kernel-image.sha256
+            artifacts/kernel-output/xiaomi-sdmmagpie.dtb \
+            artifacts/kernel-output/sweet-sdmmagpie-overlay.dtbo \
+            > artifacts/kernel-output/kernel-output.sha256
 
-          echo "PASS: Sweet kernel compilation completed."
+          echo "PASS: Kernel and device-tree compilation."
 
           ls -lh artifacts/kernel-output/
 
       # --------------------------------------------------
-      # 11. PREPARE ANYKERNEL3
+      # 11. PREPARE PINNED ANYKERNEL3
       # --------------------------------------------------
 
       - name: Prepare MR MATRIX AnyKernel3
@@ -652,47 +645,181 @@ jobs:
 
           AK3_DIR="$RUNNER_TEMP/AnyKernel3"
 
-          echo "Downloading AnyKernel3..."
+          echo "Cloning pinned AnyKernel3..."
 
-          git clone \
+          git init "$AK3_DIR"
+
+          git -C "$AK3_DIR" remote add origin "$ANYKERNEL_REPO"
+
+          git -C "$AK3_DIR" fetch \
             --depth=1 \
-            https://github.com/riarumoda/AnyKernel3 \
-            "$AK3_DIR"
+            origin "$ANYKERNEL_COMMIT"
+
+          git -C "$AK3_DIR" checkout \
+            --detach FETCH_HEAD
+
+          ACTUAL_AK3_COMMIT="$(
+            git -C "$AK3_DIR" rev-parse HEAD
+          )"
+
+          echo "Expected: $ANYKERNEL_COMMIT"
+          echo "Actual:   $ACTUAL_AK3_COMMIT"
+
+          test "$ACTUAL_AK3_COMMIT" = "$ANYKERNEL_COMMIT"
 
           test -s "$AK3_DIR/anykernel.sh"
           test -s "$AK3_DIR/tools/ak3-core.sh"
-          test -s "$AK3_DIR/LICENSE"
-
-          cp out/arch/arm64/boot/Image.gz \
-            "$AK3_DIR/Image.gz"
-
-          BOOT_DIR="out/arch/arm64/boot"
-
-          if [ -s "$BOOT_DIR/dtb.img" ]; then
-            cp "$BOOT_DIR/dtb.img" "$AK3_DIR/"
-          fi
-
-          if [ -s "$BOOT_DIR/dtbo.img" ]; then
-            cp "$BOOT_DIR/dtbo.img" "$AK3_DIR/"
-          fi
+          test -s "$AK3_DIR/META-INF/com/google/android/update-binary"
 
           echo "Checking Sweet device support..."
 
-          grep -q 'device.name1=sweet' \
+          grep -Fq 'device.name1=sweet' \
             "$AK3_DIR/anykernel.sh"
 
-          grep -q 'device.name2=sweetin' \
+          grep -Fq 'device.name2=sweetin' \
             "$AK3_DIR/anykernel.sh"
 
-          echo "PASS: Sweet and Sweetin entries found."
+          echo "Checking Android 17 compatibility..."
+
+          python3 - "$AK3_DIR/anykernel.sh" <<'PY'
+          import pathlib
+          import re
+          import sys
+
+          path = pathlib.Path(sys.argv[1])
+          text = path.read_text()
+
+          pattern = r"(?m)^supported\.versions=.*$"
+
+          matches = re.findall(pattern, text)
+
+          if len(matches) != 1:
+              raise SystemExit(
+                  "ERROR: Expected exactly one supported.versions entry."
+              )
+
+          text = re.sub(
+              pattern,
+              "supported.versions=17",
+              text
+          )
+
+          path.write_text(text)
+
+          if "supported.versions=17" not in text:
+              raise SystemExit(
+                  "ERROR: Android 17 version update failed."
+              )
+
+          print("PASS: Android 17 installer compatibility configured.")
+          PY
+
+          grep -Fq 'supported.versions=17' \
+            "$AK3_DIR/anykernel.sh"
 
           echo "$AK3_DIR" \
             > artifacts/anykernel-directory.txt
 
-          echo "PASS: AnyKernel3 staging completed."
+          echo "$ACTUAL_AK3_COMMIT" \
+            > artifacts/anykernel-commit.txt
+
+          echo "PASS: Pinned AnyKernel3 prepared."
 
       # --------------------------------------------------
-      # 12. PACKAGE TEST ZIP
+      # 12. STAGE KERNEL AND DEVICE TREES
+      # --------------------------------------------------
+
+      - name: Stage Sweet kernel DTB and DTBO
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          AK3_DIR="$RUNNER_TEMP/AnyKernel3"
+          OUTPUT="artifacts/kernel-output"
+
+          test -s "$OUTPUT/Image.gz"
+          test -s "$OUTPUT/xiaomi-sdmmagpie.dtb"
+          test -s "$OUTPUT/sweet-sdmmagpie-overlay.dtbo"
+
+          echo "Staging kernel image..."
+
+          cp "$OUTPUT/Image.gz" \
+            "$AK3_DIR/Image.gz"
+
+          echo "Staging compiled DTB..."
+
+          cp "$OUTPUT/xiaomi-sdmmagpie.dtb" \
+            "$AK3_DIR/dtb"
+
+          echo "Staging compiled DTBO..."
+
+          cp "$OUTPUT/sweet-sdmmagpie-overlay.dtbo" \
+            "$AK3_DIR/dtbo"
+
+          echo "Checking AnyKernel3 staged files..."
+
+          test -s "$AK3_DIR/Image.gz"
+          test -s "$AK3_DIR/dtb"
+          test -s "$AK3_DIR/dtbo"
+
+          sha256sum \
+            "$AK3_DIR/Image.gz" \
+            "$AK3_DIR/dtb" \
+            "$AK3_DIR/dtbo" \
+            > artifacts/anykernel-staged-sha256.txt
+
+          echo "PASS: Kernel, DTB and DTBO staged."
+
+          ls -lh \
+            "$AK3_DIR/Image.gz" \
+            "$AK3_DIR/dtb" \
+            "$AK3_DIR/dtbo"
+
+      # --------------------------------------------------
+      # 13. VERIFY ANYKERNEL3 INSTALLER
+      # --------------------------------------------------
+
+      - name: Verify AnyKernel3 installer
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          AK3_DIR="$RUNNER_TEMP/AnyKernel3"
+
+          echo "Checking installer configuration..."
+
+          grep -Fq 'device.name1=sweet' \
+            "$AK3_DIR/anykernel.sh"
+
+          grep -Fq 'device.name2=sweetin' \
+            "$AK3_DIR/anykernel.sh"
+
+          grep -Fq 'supported.versions=17' \
+            "$AK3_DIR/anykernel.sh"
+
+          grep -Fq 'BLOCK=/dev/block/bootdevice/by-name/boot' \
+            "$AK3_DIR/anykernel.sh"
+
+          echo "Checking staged payload..."
+
+          test -s "$AK3_DIR/Image.gz"
+          test -s "$AK3_DIR/dtb"
+          test -s "$AK3_DIR/dtbo"
+
+          echo "Checking AnyKernel3 DTBO flashing support..."
+
+          grep -Fq 'flash_generic dtbo' \
+            "$AK3_DIR/tools/ak3-core.sh"
+
+          echo "Checking installer files..."
+
+          test -s "$AK3_DIR/META-INF/com/google/android/update-binary"
+          test -s "$AK3_DIR/META-INF/com/google/android/updater-script"
+
+          echo "PASS: AnyKernel3 installer checks."
+
+      # --------------------------------------------------
+      # 14. PACKAGE TEST ZIP
       # --------------------------------------------------
 
       - name: Package MR MATRIX test ZIP
@@ -715,38 +842,90 @@ jobs:
 
           test -s "$ZIP_NAME"
 
+          echo "Testing flashable ZIP..."
+
           unzip -t "$ZIP_NAME" \
             > artifacts/anykernel-zip-validation.txt
 
           unzip -l "$ZIP_NAME" \
             > artifacts/anykernel-contents.txt
 
+          echo "Verifying ZIP payload..."
+
+          unzip -Z1 "$ZIP_NAME" | grep -Fxq 'Image.gz'
+          unzip -Z1 "$ZIP_NAME" | grep -Fxq 'dtb'
+          unzip -Z1 "$ZIP_NAME" | grep -Fxq 'dtbo'
+          unzip -Z1 "$ZIP_NAME" | grep -Fxq 'anykernel.sh'
+
           sha256sum "$ZIP_NAME" \
             > artifacts/anykernel-sha256.txt
 
-          echo "PASS: AnyKernel3 test ZIP packaged."
+          echo "PASS: Flashable test ZIP packaged."
 
           ls -lh "$ZIP_NAME"
 
       # --------------------------------------------------
-      # 13. RECORD BUILD INFORMATION
+      # 15. VERIFY FINAL PACKAGE
+      # --------------------------------------------------
+
+      - name: Final package verification
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ZIP_NAME="MR-MATRIX-BakaSU-Sweet-DroidSpace-TEST.zip"
+
+          EXPECTED_IMAGE="artifacts/kernel-output/Image.gz"
+          EXPECTED_DTB="artifacts/kernel-output/xiaomi-sdmmagpie.dtb"
+          EXPECTED_DTBO="artifacts/kernel-output/sweet-sdmmagpie-overlay.dtbo"
+
+          TMP="$RUNNER_TEMP/package-verification"
+
+          mkdir -p "$TMP"
+
+          unzip -q "$ZIP_NAME" -d "$TMP"
+
+          echo "Comparing packaged kernel..."
+
+          cmp "$EXPECTED_IMAGE" "$TMP/Image.gz"
+
+          echo "Comparing packaged DTB..."
+
+          cmp "$EXPECTED_DTB" "$TMP/dtb"
+
+          echo "Comparing packaged DTBO..."
+
+          cmp "$EXPECTED_DTBO" "$TMP/dtbo"
+
+          echo "Verifying Android 17 installer..."
+
+          grep -Fq 'supported.versions=17' \
+            "$TMP/anykernel.sh"
+
+          echo "PASS: Final package payload verified."
+
+      # --------------------------------------------------
+      # 16. RECORD BUILD INFORMATION
       # --------------------------------------------------
 
       - name: Record build information
         if: always()
         shell: bash
         run: |
+          set +e
+
           mkdir -p artifacts
 
           {
-            echo "MR MATRIX - Sweet BakaSU DroidSpace Build"
-
+            echo "MR MATRIX - Sweet BakaSU DroidSpace"
+            echo
             echo "Branch: $KERNEL_BRANCH"
-            echo "Commit: $(git rev-parse HEAD)"
-            echo "Kernel version: $(make -s kernelversion || true)"
-
+            echo "Commit: $(git rev-parse HEAD 2>/dev/null)"
+            echo "Kernel: $(make -s kernelversion 2>/dev/null)"
+            echo
             echo "BakaSU commit: $BAKASU_COMMIT"
             echo "Neutron Clang: $CLANG_RELEASE"
+            echo "AnyKernel3 commit: $ANYKERNEL_COMMIT"
 
             echo
             echo "BakaSU configuration:"
@@ -764,9 +943,14 @@ jobs:
 
             if [ -s out/.config ]; then
               grep -E \
-                '^(CONFIG_USER_NS=|CONFIG_PID_NS=|CONFIG_IPC_NS=|CONFIG_NET_NS=|CONFIG_SECCOMP=|CONFIG_SECCOMP_FILTER=|CONFIG_CGROUPS=|CONFIG_OVERLAY_FS=|CONFIG_IP6_NF_NAT=|CONFIG_IP6_NF_TARGET_MASQUERADE=)' \
+                '^(CONFIG_USER_NS=|CONFIG_PID_NS=|CONFIG_IPC_NS=|CONFIG_NET_NS=|CONFIG_SECCOMP=|CONFIG_SECCOMP_FILTER=|CONFIG_CGROUPS=|CONFIG_CGROUP_SCHED=|CONFIG_CFS_BANDWIDTH=|CONFIG_OVERLAY_FS=|CONFIG_SCHED_WALT=)' \
                 out/.config || true
             fi
+
+            echo
+            echo "Device tree outputs:"
+
+            ls -lh artifacts/kernel-output/ 2>/dev/null || true
 
             echo
             echo "Build result: ${{ job.status }}"
@@ -774,7 +958,7 @@ jobs:
           } > artifacts/build-info.txt
 
       # --------------------------------------------------
-      # 14. UPLOAD BUILD ARTIFACTS
+      # 17. UPLOAD BUILD ARTIFACTS
       # --------------------------------------------------
 
       - name: Upload MR MATRIX kernel artifacts
