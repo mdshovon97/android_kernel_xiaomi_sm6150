@@ -4793,27 +4793,25 @@ static void throttle_cfs_rq(struct cfs_rq *cfs_rq)
 	rcu_read_unlock();
 
 	task_delta = cfs_rq->h_nr_running;
-	idle_task_delta = cfs_rq->idle_h_nr_running;
-	for_each_sched_entity(se) {
-		struct cfs_rq *qcfs_rq = cfs_rq_of(se);
-		/* throttled entity or throttle-on-deactivate */
-		if (!se->on_rq)
-			break;
+    idle_task_delta = cfs_rq->idle_h_nr_running;
 
-		if (dequeue) {
-			dequeue_entity(qcfs_rq, se, DEQUEUE_SLEEP);
-		} else {
-			update_load_avg(qcfs_rq, se, 0);
-			se_update_runnable(se);
-		}
+    for_each_sched_entity(se) {
+        struct cfs_rq *qcfs_rq = cfs_rq_of(se);
 
-		qcfs_rq->h_nr_running -= task_delta;
-		qcfs_rq->idle_h_nr_running -= idle_task_delta;
-		walt_dec_throttled_cfs_rq_stats(&qcfs_rq->walt_stats, cfs_rq);
+        if (!se->on_rq)
+            break;
 
-		if (qcfs_rq->load.weight)
-			dequeue = 0;
-	}
+        if (dequeue) {
+            dequeue_entity(qcfs_rq, se, DEQUEUE_SLEEP);
+        }
+
+        qcfs_rq->h_nr_running -= task_delta;
+        qcfs_rq->idle_h_nr_running -= idle_task_delta;
+        walt_dec_throttled_cfs_rq_stats(&qcfs_rq->walt_stats, cfs_rq);
+
+        if (qcfs_rq->load.weight)
+            dequeue = 0;
+    }
 
 	if (!se) {
 		sub_nr_running(rq, task_delta);
@@ -4878,12 +4876,9 @@ void unthrottle_cfs_rq(struct cfs_rq *cfs_rq)
 			enqueue = 0;
 
 		cfs_rq = cfs_rq_of(se);
-		if (enqueue) {
-			enqueue_entity(cfs_rq, se, ENQUEUE_WAKEUP);
-		} else {
-			update_load_avg(cfs_rq, se, 0);
-			se_update_runnable(se);
-		}
+	if (enqueue) {
+       enqueue_entity(cfs_rq, se, ENQUEUE_WAKEUP);
+    }
 
 		cfs_rq->h_nr_running += task_delta;
 		cfs_rq->idle_h_nr_running += idle_task_delta;
@@ -4892,8 +4887,6 @@ void unthrottle_cfs_rq(struct cfs_rq *cfs_rq)
 		if (cfs_rq_throttled(cfs_rq))
 			break;
 	}
-
-	assert_list_leaf_cfs_rq(rq);
 
 	if (!se) {
 		add_nr_running(rq, task_delta);
