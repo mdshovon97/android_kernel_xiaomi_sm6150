@@ -1,0 +1,504 @@
+name: MR MATRIX - Sweet DroidSpace SnapStore Kernel Build
+
+on:
+  push:
+    branches:
+      - matrix-droidspace-snapstore
+
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: matrix-droidspace-snapstore-build
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build Sweet Linux 4.14 DroidSpace Kernel
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+
+    env:
+      ARCH: arm64
+      SUBARCH: arm64
+
+      KERNEL_REPO: mdshovon97/android_kernel_xiaomi_sm6150
+      KERNEL_BRANCH: matrix-droidspace-snapstore
+
+      BAKASU_COMMIT: 516d3e87fbc986ccefdde2c2765f1700612441a9
+
+      CLANG_RELEASE: 06092026
+      CLANG_ASSET_ID: "546798216"
+      CLANG_SHA256: 531083928c8e37f6b31e324dbfd0b5a8323f989b1c57ff2c1368b889b5b1bd30
+
+      KERNEL_DIR: kernel
+
+      KBUILD_BUILD_USER: MR_MATRIX
+      KBUILD_BUILD_HOST: SWEET_DROIDSPACE_BUILDER
+
+    steps:
+      # --------------------------------------------------
+      # 1. CHECKOUT EXACT DROIDSPACE BRANCH
+      # --------------------------------------------------
+
+      - name: Checkout MR MATRIX DroidSpace kernel
+        uses: actions/checkout@v4
+        with:
+          repository: mdshovon97/android_kernel_xiaomi_sm6150
+          ref: matrix-droidspace-snapstore
+          path: kernel
+          fetch-depth: 1
+
+      - name: Record source revision
+        shell: bash
+        working-directory: kernel
+        run: |
+          set -euo pipefail
+
+          echo "Repository: $KERNEL_REPO"
+          echo "Branch: $KERNEL_BRANCH"
+          echo "Commit: $(git rev-parse HEAD)"
+          echo
+          git log -1 --format=fuller
+
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA" || {
+            echo "ERROR: Checked-out commit does not match the workflow event SHA."
+            exit 1
+          }
+
+          test -f arch/arm64/configs/sweet_defconfig
+          test -f kernel/cgroup/cgroup.c
+
+          echo "PASS: Correct Sweet DroidSpace source checked out."
+
+      # --------------------------------------------------
+      # 2. INSTALL BUILD DEPENDENCIES
+      # --------------------------------------------------
+
+      - name: Install build dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          sudo apt-get update
+
+          sudo apt-get install -y \
+            bc \
+            bison \
+            build-essential \
+            ccache \
+            curl \
+            device-tree-compiler \
+            flex \
+            gcc-aarch64-linux-gnu \
+            gcc-arm-linux-gnueabi \
+            git \
+            libelf-dev \
+            libncurses-dev \
+            libssl-dev \
+            lld \
+            make \
+            perl \
+            python3 \
+            python-is-python3 \
+            rsync \
+            unzip \
+            zstd
+
+          echo "ARM64 linker:"
+          command -v aarch64-linux-gnu-ld
+          aarch64-linux-gnu-ld --version
+
+          echo "ARM32 compatibility linker:"
+          command -v arm-linux-gnueabi-ld
+          arm-linux-gnueabi-ld --version
+
+          echo "PASS: Build dependencies installed."
+
+      # --------------------------------------------------
+      # 3. DOWNLOAD PINNED NEUTRON CLANG
+      # --------------------------------------------------
+
+      - name: Download pinned Neutron Clang
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ASSET_URL="https://api.github.com/repos/Neutron-Toolchains/clang-build-catalogue/releases/assets/${CLANG_ASSET_ID}"
+
+          TOOLCHAIN_DIR="$RUNNER_TEMP/toolchain"
+          ARCHIVE="$RUNNER_TEMP/neutron-clang.tar.zst"
+
+          mkdir -p "$TOOLCHAIN_DIR"
+
+          echo "Downloading Neutron Clang ${CLANG_RELEASE}"
+
+          curl -fL \
+            --retry 3 \
+            --retry-delay 5 \
+            --connect-timeout 30 \
+            -H "Accept: application/octet-stream" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "$ASSET_URL" \
+            -o "$ARCHIVE"
+
+          echo "Verifying SHA-256..."
+          echo "${CLANG_SHA256}  ${ARCHIVE}" | sha256sum -c -
+
+          echo "Extracting toolchain..."
+          tar --zstd -xf "$ARCHIVE" -C "$TOOLCHAIN_DIR"
+
+          if [ ! -x "$TOOLCHAIN_DIR/bin/clang" ]; then
+            echo "ERROR: Expected Clang executable not found."
+            find "$TOOLCHAIN_DIR" -maxdepth 5 -type f -name clang -print
+            exit 1
+          fi
+
+          echo "$TOOLCHAIN_DIR/bin" >> "$GITHUB_PATH"
+
+          "$TOOLCHAIN_DIR/bin/clang" --version
+
+          echo "PASS: Pinned Neutron Clang installed."
+
+      # --------------------------------------------------
+      # 4. INTEGRATE PINNED BAKASU
+      # --------------------------------------------------
+
+      - name: Integrate pinned BakaSU
+        shell: bash
+        working-directory: kernel
+        run: |
+          set -euo pipefail
+
+          SETUP_SCRIPT="$RUNNER_TEMP/bakasu-setup.sh"
+
+          curl -fL \
+            --retry 3 \
+            --retry-delay 5 \
+            "https://raw.githubusercontent.com/Baka-SU/BakaSU/${BAKASU_COMMIT}/kernel/setup.sh" \
+            -o "$SETUP_SCRIPT"
+
+          echo "Validating BakaSU setup script..."
+          sh -n "$SETUP_SCRIPT"
+
+          echo "Integrating pinned BakaSU commit..."
+          sh "$SETUP_SCRIPT" "$BAKASU_COMMIT"
+
+          test -d KernelSU/.git
+          test -L drivers/kernelsu
+          test -d drivers/kernelsu
+
+          ACTUAL_BAKASU="$(git -C KernelSU rev-parse HEAD)"
+
+          echo "Expected BakaSU: $BAKASU_COMMIT"
+          echo "Actual BakaSU:   $ACTUAL_BAKASU"
+
+          test "$ACTUAL_BAKASU" = "$BAKASU_COMMIT"
+
+          grep -Fq 'obj-$(CONFIG_KSU) += kernelsu/' drivers/Makefile
+          grep -Fq 'source "drivers/kernelsu/Kconfig"' drivers/Kconfig
+
+          echo "PASS: Pinned BakaSU integration."
+
+      # --------------------------------------------------
+      # 5. VERIFY DROIDSPACE PATCH 02 SOURCE
+      # --------------------------------------------------
+
+      - name: Verify DroidSpace cgroup compatibility patch
+        shell: bash
+        working-directory: kernel
+        run: |
+          set -euo pipefail
+
+          CGROUP_SOURCE="kernel/cgroup/cgroup.c"
+
+          test -s "$CGROUP_SOURCE"
+
+          grep -Fq 'static int cgroup_add_file(' "$CGROUP_SOURCE"
+          grep -Fq 'CGRP_ROOT_NOPREFIX' "$CGROUP_SOURCE"
+          grep -Fq 'CFTYPE_NO_PREFIX' "$CGROUP_SOURCE"
+          grep -Fq 'cgroup_on_dfl(cgrp)' "$CGROUP_SOURCE"
+          grep -Fq 'cft->ss->legacy_name' "$CGROUP_SOURCE"
+          grep -Fq 'kernfs_create_link(cgrp->kn, name, kn);' "$CGROUP_SOURCE"
+
+          echo "PASS: DroidSpace Patch 02 implementation detected."
+          echo "No duplicate patch application will be performed."
+
+      # --------------------------------------------------
+      # 6. GENERATE AND VALIDATE SWEET CONFIGURATION
+      # --------------------------------------------------
+
+      - name: Generate Sweet DroidSpace configuration
+        shell: bash
+        working-directory: kernel
+        run: |
+          set -euo pipefail
+
+          mkdir -p out artifacts
+
+          COMMON_ARGS=(
+            ARCH=arm64
+            CC=clang
+            CROSS_COMPILE=aarch64-linux-gnu-
+            CROSS_COMPILE_ARM32=arm-linux-gnueabi-
+            CROSS_COMPILE_COMPAT=arm-linux-gnueabi-
+          )
+
+          echo "Generating sweet_defconfig..."
+
+          make O=out \
+            "${COMMON_ARGS[@]}" \
+            sweet_defconfig
+
+          echo "Running olddefconfig..."
+
+          make O=out \
+            "${COMMON_ARGS[@]}" \
+            olddefconfig
+
+          CONFIG="out/.config"
+          test -s "$CONFIG"
+
+          REQUIRED_OPTIONS=(
+            CONFIG_KSU
+            CONFIG_KSU_MANUAL_HOOK
+            CONFIG_KALLSYMS
+            CONFIG_KALLSYMS_ALL
+            CONFIG_DEBUG_KERNEL
+
+            CONFIG_CGROUPS
+            CONFIG_MEMCG
+            CONFIG_CGROUP_PIDS
+            CONFIG_CGROUP_DEVICE
+            CONFIG_CGROUP_FREEZER
+            CONFIG_CGROUP_CPUACCT
+            CONFIG_CGROUP_NET_PRIO
+            CONFIG_CGROUP_BPF
+            CONFIG_SOCK_CGROUP_DATA
+
+            CONFIG_NAMESPACES
+            CONFIG_UTS_NS
+            CONFIG_USER_NS
+            CONFIG_PID_NS
+            CONFIG_IPC_NS
+            CONFIG_NET_NS
+
+            CONFIG_SECCOMP
+            CONFIG_SECCOMP_FILTER
+
+            CONFIG_DEVTMPFS
+            CONFIG_TMPFS
+            CONFIG_TMPFS_POSIX_ACL
+            CONFIG_TMPFS_XATTR
+            CONFIG_OVERLAY_FS
+            CONFIG_FUSE_FS
+            CONFIG_SQUASHFS
+            CONFIG_SQUASHFS_XATTR
+            CONFIG_SQUASHFS_XZ
+            CONFIG_SQUASHFS_ZLIB
+
+            CONFIG_SECURITY
+            CONFIG_SECURITYFS
+            CONFIG_SECURITY_SELINUX
+            CONFIG_SECURITY_APPARMOR
+            CONFIG_AUDIT
+          )
+
+          echo "Checking required BakaSU and DroidSpace options..."
+
+          for OPTION in "${REQUIRED_OPTIONS[@]}"; do
+            if ! grep -qx "${OPTION}=y" "$CONFIG"; then
+              echo "FAIL: ${OPTION} is not enabled after olddefconfig."
+              grep -E "^(${OPTION}=|# ${OPTION} is not set)" "$CONFIG" || true
+              exit 1
+            fi
+
+            echo "PASS: ${OPTION}=y"
+          done
+
+          if grep -qx 'CONFIG_KSU_TRACEPOINT_HOOK=y' "$CONFIG"; then
+            echo "FAIL: BakaSU tracepoint hook is enabled."
+            exit 1
+          fi
+
+          if grep -qx 'CONFIG_KSU_SUSFS=y' "$CONFIG"; then
+            echo "FAIL: SUSFS is enabled in this build phase."
+            exit 1
+          fi
+
+          cp "$CONFIG" artifacts/generated-sweet.config
+
+          echo "PASS: DroidSpace configuration validated."
+
+      # --------------------------------------------------
+      # 7. VERIFY BAKASU MANUAL-HOOK IMPLEMENTATION
+      # --------------------------------------------------
+
+      - name: Verify official BakaSU manual hooks
+        shell: bash
+        working-directory: kernel
+        run: |
+          set -euo pipefail
+
+          CHECKER="drivers/kernelsu/tools/manual_hook_check.mk"
+          CONFIG="$PWD/out/.config"
+          CHECK_MK="$RUNNER_TEMP/matrix-check.mk"
+
+          mkdir -p artifacts
+
+          test -f "$CHECKER"
+          test -s "$CONFIG"
+
+          KERNEL_VERSION="$(make -s kernelversion)"
+          VERSION_MAJOR="${KERNEL_VERSION%%.*}"
+          VERSION_REST="${KERNEL_VERSION#*.}"
+          VERSION_MINOR="${VERSION_REST%%.*}"
+
+          cat > "$CHECK_MK" <<'EOF'
+          include $(KSU_CONFIG_FILE)
+          include $(KSU_CHECKER_FILE)
+
+          .DEFAULT_GOAL := check
+
+          .PHONY: check
+          check:
+          	@echo "PASS: Official BakaSU manual-hook checker"
+          EOF
+
+          set -o pipefail
+
+          make --no-print-directory \
+            -f "$CHECK_MK" \
+            srctree="$PWD" \
+            VERSION="$VERSION_MAJOR" \
+            PATCHLEVEL="$VERSION_MINOR" \
+            REPO_NAME="BakaSU" \
+            KSU_CONFIG_FILE="$CONFIG" \
+            KSU_CHECKER_FILE="$PWD/$CHECKER" \
+            check \
+            2>&1 | tee artifacts/manual-hook-check.log
+
+          echo "PASS: BakaSU manual-hook validation."
+
+      # --------------------------------------------------
+      # 8. VERIFY TOOLCHAIN
+      # --------------------------------------------------
+
+      - name: Verify compiler and cross-linkers
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          command -v clang
+          clang --version
+
+          command -v aarch64-linux-gnu-ld
+          aarch64-linux-gnu-ld --version
+
+          command -v arm-linux-gnueabi-ld
+          arm-linux-gnueabi-ld --version
+
+          echo "PASS: ARM64 and ARM32 toolchains available."
+
+      # --------------------------------------------------
+      # 9. COMPILE SWEET KERNEL AND DEVICE TREES
+      # --------------------------------------------------
+
+      - name: Compile Sweet Image.gz and DTBs
+        shell: bash
+        working-directory: kernel
+        run: |
+          set -euo pipefail
+
+          mkdir -p artifacts
+
+          MAKE_ARGS=(
+            ARCH=arm64
+            CC=clang
+            CROSS_COMPILE=aarch64-linux-gnu-
+            CROSS_COMPILE_ARM32=arm-linux-gnueabi-
+            CROSS_COMPILE_COMPAT=arm-linux-gnueabi-
+          )
+
+          echo "Kernel version:"
+          make -s kernelversion
+
+          echo "Starting Sweet ARM64 build..."
+          echo "Build jobs: $(nproc)"
+
+          set -o pipefail
+
+          make -j"$(nproc)" \
+            O=out \
+            "${MAKE_ARGS[@]}" \
+            Image.gz dtbs \
+            2>&1 | tee artifacts/build.log
+
+          IMAGE="out/arch/arm64/boot/Image.gz"
+
+          if [ ! -s "$IMAGE" ]; then
+            echo "FAIL: Image.gz was not generated."
+            exit 1
+          fi
+
+          cp "$IMAGE" artifacts/Image.gz
+
+          if [ -d out/arch/arm64/boot/dts ]; then
+            tar -czf artifacts/dtb-output.tar.gz \
+              -C out/arch/arm64/boot dts
+          fi
+
+          sha256sum artifacts/Image.gz | tee artifacts/Image.gz.sha256
+
+          echo "PASS: Sweet kernel Image.gz generated."
+
+      # --------------------------------------------------
+      # 10. RECORD BUILD INFORMATION
+      # --------------------------------------------------
+
+      - name: Record build information
+        if: always()
+        shell: bash
+        working-directory: kernel
+        run: |
+          mkdir -p artifacts
+
+          {
+            echo "MR MATRIX - Sweet DroidSpace SnapStore Kernel Build"
+            echo
+            echo "Repository: $KERNEL_REPO"
+            echo "Branch: $KERNEL_BRANCH"
+            echo "Commit: $(git rev-parse HEAD 2>/dev/null || echo unavailable)"
+            echo "BakaSU commit: $BAKASU_COMMIT"
+            echo "Neutron Clang release: $CLANG_RELEASE"
+            echo "Kernel version: $(make -s kernelversion 2>/dev/null || echo unavailable)"
+            echo
+            echo "DroidSpace configuration:"
+
+            if [ -s out/.config ]; then
+              grep -E \
+                '^(CONFIG_(KSU|KSU_MANUAL_HOOK|CGROUPS|MEMCG|CGROUP_PIDS|CGROUP_DEVICE|CGROUP_FREEZER|CGROUP_CPUACCT|CGROUP_NET_PRIO|USER_NS|PID_NS|IPC_NS|NET_NS|DEVTMPFS|OVERLAY_FS|FUSE_FS|SQUASHFS|SECCOMP|SECCOMP_FILTER|SECURITY_SELINUX|SECURITY_APPARMOR|AUDIT)=)' \
+                out/.config || true
+            else
+              echo "Configuration not generated."
+            fi
+
+            echo
+            echo "Build result: ${{ job.status }}"
+          } > artifacts/build-info.txt
+
+      # --------------------------------------------------
+      # 11. UPLOAD BUILD ARTIFACTS
+      # --------------------------------------------------
+
+      - name: Upload Sweet DroidSpace build artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: MR-MATRIX-Sweet-DroidSpace-SnapStore-${{ github.run_number }}
+          path: |
+            kernel/artifacts/
+          if-no-files-found: warn
+          retention-days: 14
