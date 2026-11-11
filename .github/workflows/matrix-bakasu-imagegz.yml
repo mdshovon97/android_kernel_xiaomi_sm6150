@@ -113,6 +113,7 @@ jobs:
           echo "ARM32 compatibility linker:"
           command -v arm-linux-gnueabi-ld
 
+
       # --------------------------------------------------
       # 3. DOWNLOAD PINNED NEUTRON CLANG
       # --------------------------------------------------
@@ -140,7 +141,26 @@ jobs:
             "$ASSET_URL" \
             -o "$ARCHIVE"
 
-          echo "${CLANG_SHA256}  ${ARCHIVE}" | sha256sum -c -
+          echo "Validating downloaded archive..."
+
+          test -s "$ARCHIVE"
+
+          if ! [[ "$CLANG_SHA256" =~ ^[a-fA-F0-9]{64}$ ]]; then
+            echo "ERROR: Invalid SHA256 format."
+            exit 1
+          fi
+
+          ACTUAL_SHA256="$(sha256sum "$ARCHIVE" | awk '{print $1}')"
+
+          echo "Expected SHA256: $CLANG_SHA256"
+          echo "Actual SHA256:   $ACTUAL_SHA256"
+
+          if [ "$ACTUAL_SHA256" != "$CLANG_SHA256" ]; then
+            echo "ERROR: Neutron Clang checksum mismatch."
+            exit 1
+          fi
+
+          echo "PASS: Neutron Clang checksum verified."
 
           tar --zstd -xf "$ARCHIVE" -C "$TOOLCHAIN_DIR"
 
@@ -153,6 +173,8 @@ jobs:
           echo "$TOOLCHAIN_DIR/bin" >> "$GITHUB_PATH"
 
           "$TOOLCHAIN_DIR/bin/clang" --version
+
+          echo "PASS: Neutron Clang installed."
 
       # --------------------------------------------------
       # 4. INTEGRATE PINNED BAKASU
