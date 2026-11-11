@@ -30,7 +30,7 @@ concurrency:
 
 jobs:
   build:
-    name: Build Sweet Image.gz - BakaSU + DroidSpaces Stage 1
+    name: Build Sweet Image.gz - BakaSU + DroidSpaces Stage 1 & 2
     runs-on: ubuntu-24.04
     timeout-minutes: 180
 
@@ -45,7 +45,7 @@ jobs:
 
       CLANG_RELEASE: 06092026
       CLANG_ASSET_ID: "546798216"
-      CLANG_SHA256: 531083928c8e37f6b31e324dbfd0b5a8323f989b1c57ff2c1368b889b5b1bd30
+      CLANG_SHA256: 531083928c8e37f6b31e324db0b5a8323f989b1c57ff2c1368b889b5b1bd30
 
       KBUILD_BUILD_USER: MR_MATRIX
       KBUILD_BUILD_HOST: SWEET_BUILDER
@@ -296,16 +296,20 @@ jobs:
           echo "PASS: BakaSU configuration validated."
 
       # --------------------------------------------------
-      # 7. VALIDATE DROIDSPACES STAGE 1 CONFIGURATION
+      # 7. VALIDATE DROIDSPACES STAGE 1 + STAGE 2
       # --------------------------------------------------
 
-      - name: Validate DroidSpaces namespace configuration
+      - name: Validate DroidSpaces Stage 1 and Stage 2 configuration
         shell: bash
         working-directory: kernel
         run: |
           set -euo pipefail
 
           CONFIG="out/.config"
+          SUMMARY="artifacts/droidspaces-config-summary.txt"
+
+          test -s "$CONFIG"
+          mkdir -p artifacts
 
           require_enabled() {
             local option="$1"
@@ -313,10 +317,14 @@ jobs:
             if grep -qx "${option}=y" "$CONFIG"; then
               echo "PASS: ${option}=y"
             else
-              echo "FAIL: DroidSpaces requirement ${option} is disabled."
+              echo "FAIL: ${option} is not enabled after olddefconfig."
               exit 1
             fi
           }
+
+          echo "======================================"
+          echo "DroidSpaces Stage 1 validation"
+          echo "======================================"
 
           for OPTION in \
             CONFIG_NAMESPACES \
@@ -328,16 +336,43 @@ jobs:
             require_enabled "$OPTION"
           done
 
+          echo
+          echo "======================================"
+          echo "DroidSpaces Stage 2 validation"
+          echo "======================================"
+
+          for OPTION in \
+            CONFIG_USER_NS \
+            CONFIG_DEVTMPFS \
+            CONFIG_CGROUPS \
+            CONFIG_CGROUP_DEVICE \
+            CONFIG_SYSCTL \
+            CONFIG_POSIX_MQUEUE
+          do
+            require_enabled "$OPTION"
+          done
+
           {
-            echo "DroidSpaces Stage 1 configuration"
-            echo "---------------------------------"
+            echo "MR MATRIX - DroidSpaces Configuration"
+            echo "======================================"
+            echo
+            echo "[Stage 1 - Core namespaces]"
 
             grep -E \
               '^(CONFIG_NAMESPACES=|CONFIG_UTS_NS=|CONFIG_PID_NS=|CONFIG_SYSVIPC=|CONFIG_IPC_NS=)' \
               "$CONFIG"
-          } | tee artifacts/droidspaces-stage1-config.txt
 
-          echo "PASS: DroidSpaces Stage 1 configuration validated."
+            echo
+            echo "[Stage 2 - User namespace and device support]"
+
+            grep -E \
+              '^(CONFIG_USER_NS=|CONFIG_DEVTMPFS=|CONFIG_CGROUPS=|CONFIG_CGROUP_DEVICE=|CONFIG_SYSCTL=|CONFIG_POSIX_MQUEUE=)' \
+              "$CONFIG"
+
+          } | tee "$SUMMARY"
+
+          echo
+          echo "PASS: DroidSpaces Stage 1 + Stage 2 configuration validated."
 
       # --------------------------------------------------
       # 8. OFFICIAL BAKASU MANUAL-HOOK CHECKER
@@ -475,12 +510,13 @@ jobs:
           mkdir -p artifacts
 
           {
-            echo "MR MATRIX - Sweet DroidSpaces BakaSU Image.gz"
+            echo "MR MATRIX - Sweet DroidSpaces Stage 1 + 2 BakaSU Image.gz"
             echo "Repository: $KERNEL_REPO"
             echo "Branch: $KERNEL_BRANCH"
             echo "Kernel commit: $(git rev-parse HEAD)"
             echo "BakaSU commit: $BAKASU_COMMIT"
             echo "Clang release: $CLANG_RELEASE"
+            echo "DroidSpaces: Stage 1 + Stage 2"
             echo "Kernel version: $(make -s kernelversion || true)"
             echo "Build result: ${{ job.status }}"
 
@@ -504,7 +540,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: MR-MATRIX-Sweet-DroidSpaces-BakaSU-Image.gz
+          name: MR-MATRIX-Sweet-DroidSpaces-Stage1-Stage2-BakaSU-Image.gz
           path: kernel/artifacts/
           if-no-files-found: warn
           retention-days: 14
