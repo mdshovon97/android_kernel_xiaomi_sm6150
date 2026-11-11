@@ -1,20 +1,23 @@
 
-name: MR MATRIX - Sweet BakaSU Image.gz Build
+name: MR MATRIX - Sweet DroidSpaces BakaSU Image.gz Build
 
 on:
   workflow_dispatch:
 
   push:
     branches:
-      - matrix-bakasu-test
+      - matrix-droidspace-bakasu
     paths:
       - '.github/workflows/matrix-bakasu-imagegz.yml'
-      - 'arch/arm64/configs/sweet_defconfig'
+      - 'arch/**'
       - 'drivers/**'
       - 'fs/**'
-      - 'kernel/**'
       - 'include/**'
       - 'init/**'
+      - 'kernel/**'
+      - 'mm/**'
+      - 'net/**'
+      - 'security/**'
       - 'scripts/**'
       - 'Makefile'
 
@@ -22,12 +25,12 @@ permissions:
   contents: read
 
 concurrency:
-  group: matrix-bakasu-imagegz
+  group: matrix-droidspace-bakasu-imagegz
   cancel-in-progress: false
 
 jobs:
   build:
-    name: Build Sweet Image.gz with BakaSU
+    name: Build Sweet Image.gz - BakaSU + DroidSpaces Stage 1
     runs-on: ubuntu-24.04
     timeout-minutes: 180
 
@@ -36,7 +39,7 @@ jobs:
       SUBARCH: arm64
 
       KERNEL_REPO: mdshovon97/android_kernel_xiaomi_sm6150
-      KERNEL_BRANCH: matrix-bakasu-test
+      KERNEL_BRANCH: matrix-droidspace-bakasu
 
       BAKASU_COMMIT: 516d3e87fbc986ccefdde2c2765f1700612441a9
 
@@ -48,13 +51,15 @@ jobs:
       KBUILD_BUILD_HOST: SWEET_BUILDER
 
     steps:
-      # 1. CHECKOUT SOURCE
+      # --------------------------------------------------
+      # 1. CHECKOUT TARGET BRANCH
+      # --------------------------------------------------
 
-      - name: Checkout kernel source
+      - name: Checkout matrix-droidspace-bakasu
         uses: actions/checkout@v4
         with:
           repository: mdshovon97/android_kernel_xiaomi_sm6150
-          ref: matrix-bakasu-test
+          ref: matrix-droidspace-bakasu
           path: kernel
           fetch-depth: 1
 
@@ -67,13 +72,14 @@ jobs:
           mkdir -p artifacts
 
           echo "Repository: $KERNEL_REPO"
-          echo "Branch: $KERNEL_BRANCH"
-          echo "Commit: $(git rev-parse HEAD)"
+          echo "Expected branch: $KERNEL_BRANCH"
+          echo "Actual commit: $(git rev-parse HEAD)"
 
-          git log -1 --oneline \
-            | tee artifacts/source-commit.txt
+          git log -1 --oneline | tee artifacts/source-commit.txt
 
-      # 2. BUILD DEPENDENCIES
+      # --------------------------------------------------
+      # 2. INSTALL BUILD DEPENDENCIES
+      # --------------------------------------------------
 
       - name: Install build dependencies
         shell: bash
@@ -86,6 +92,7 @@ jobs:
             bc \
             bison \
             build-essential \
+            ccache \
             curl \
             flex \
             gcc-aarch64-linux-gnu \
@@ -100,10 +107,15 @@ jobs:
             unzip \
             zstd
 
+          echo "ARM64 linker:"
           command -v aarch64-linux-gnu-ld
+
+          echo "ARM32 compatibility linker:"
           command -v arm-linux-gnueabi-ld
 
+      # --------------------------------------------------
       # 3. DOWNLOAD PINNED NEUTRON CLANG
+      # --------------------------------------------------
 
       - name: Download pinned Neutron Clang
         shell: bash
@@ -117,6 +129,8 @@ jobs:
 
           mkdir -p "$TOOLCHAIN_DIR"
 
+          echo "Downloading Neutron Clang $CLANG_RELEASE"
+
           curl -fL \
             --retry 3 \
             --retry-delay 5 \
@@ -126,11 +140,9 @@ jobs:
             "$ASSET_URL" \
             -o "$ARCHIVE"
 
-          echo "${CLANG_SHA256}  ${ARCHIVE}" \
-            | sha256sum -c -
+          echo "${CLANG_SHA256}  ${ARCHIVE}" | sha256sum -c -
 
-          tar --zstd -xf "$ARCHIVE" \
-            -C "$TOOLCHAIN_DIR"
+          tar --zstd -xf "$ARCHIVE" -C "$TOOLCHAIN_DIR"
 
           if [ ! -x "$TOOLCHAIN_DIR/bin/clang" ]; then
             echo "ERROR: Clang executable not found."
@@ -142,7 +154,9 @@ jobs:
 
           "$TOOLCHAIN_DIR/bin/clang" --version
 
+      # --------------------------------------------------
       # 4. INTEGRATE PINNED BAKASU
+      # --------------------------------------------------
 
       - name: Integrate pinned BakaSU
         shell: bash
@@ -155,10 +169,13 @@ jobs:
           curl -fL \
             --retry 3 \
             --retry-delay 5 \
+            --connect-timeout 30 \
             "https://raw.githubusercontent.com/Baka-SU/BakaSU/${BAKASU_COMMIT}/kernel/setup.sh" \
             -o "$SETUP_SCRIPT"
 
           sh -n "$SETUP_SCRIPT"
+
+          echo "Integrating BakaSU commit: $BAKASU_COMMIT"
 
           sh "$SETUP_SCRIPT" "$BAKASU_COMMIT"
 
@@ -181,9 +198,17 @@ jobs:
             'source "drivers/kernelsu/Kconfig"' \
             drivers/Kconfig
 
-          echo "PASS: BakaSU integrated."
+          test -f drivers/kernelsu/tools/manual_hook_check.mk
 
+          grep -Fq \
+            'include $(KSU_SRC)/tools/manual_hook_check.mk' \
+            drivers/kernelsu/Kbuild
+
+          echo "PASS: Pinned BakaSU integration verified."
+
+      # --------------------------------------------------
       # 5. GENERATE SWEET CONFIGURATION
+      # --------------------------------------------------
 
       - name: Generate Sweet configuration
         shell: bash
@@ -201,7 +226,11 @@ jobs:
             CROSS_COMPILE_COMPAT=arm-linux-gnueabi-
           )
 
+          echo "Generating sweet_defconfig..."
+
           make O=out "${MAKE_ARGS[@]}" sweet_defconfig
+
+          echo "Running olddefconfig..."
 
           make O=out "${MAKE_ARGS[@]}" olddefconfig
 
@@ -213,7 +242,9 @@ jobs:
 
           echo "PASS: Sweet configuration generated."
 
+      # --------------------------------------------------
       # 6. VALIDATE BAKASU CONFIGURATION
+      # --------------------------------------------------
 
       - name: Validate BakaSU configuration
         shell: bash
@@ -248,12 +279,12 @@ jobs:
           done
 
           if grep -qx 'CONFIG_KSU_TRACEPOINT_HOOK=y' "$CONFIG"; then
-            echo "FAIL: Tracepoint hook selected."
+            echo "FAIL: Unsupported tracepoint hook selected."
             exit 1
           fi
 
           if grep -qx 'CONFIG_KSU_SUSFS=y' "$CONFIG"; then
-            echo "FAIL: Unexpected SUSFS configuration."
+            echo "FAIL: SUSFS is not part of this build stage."
             exit 1
           fi
 
@@ -262,7 +293,55 @@ jobs:
             "$CONFIG" \
             | tee artifacts/bakasu-config-summary.txt
 
-      # 7. OFFICIAL BAKASU MANUAL-HOOK CHECKER
+          echo "PASS: BakaSU configuration validated."
+
+      # --------------------------------------------------
+      # 7. VALIDATE DROIDSPACES STAGE 1 CONFIGURATION
+      # --------------------------------------------------
+
+      - name: Validate DroidSpaces namespace configuration
+        shell: bash
+        working-directory: kernel
+        run: |
+          set -euo pipefail
+
+          CONFIG="out/.config"
+
+          require_enabled() {
+            local option="$1"
+
+            if grep -qx "${option}=y" "$CONFIG"; then
+              echo "PASS: ${option}=y"
+            else
+              echo "FAIL: DroidSpaces requirement ${option} is disabled."
+              exit 1
+            fi
+          }
+
+          for OPTION in \
+            CONFIG_NAMESPACES \
+            CONFIG_UTS_NS \
+            CONFIG_PID_NS \
+            CONFIG_SYSVIPC \
+            CONFIG_IPC_NS
+          do
+            require_enabled "$OPTION"
+          done
+
+          {
+            echo "DroidSpaces Stage 1 configuration"
+            echo "---------------------------------"
+
+            grep -E \
+              '^(CONFIG_NAMESPACES=|CONFIG_UTS_NS=|CONFIG_PID_NS=|CONFIG_SYSVIPC=|CONFIG_IPC_NS=)' \
+              "$CONFIG"
+          } | tee artifacts/droidspaces-stage1-config.txt
+
+          echo "PASS: DroidSpaces Stage 1 configuration validated."
+
+      # --------------------------------------------------
+      # 8. OFFICIAL BAKASU MANUAL-HOOK CHECKER
+      # --------------------------------------------------
 
       - name: Verify official BakaSU manual hooks
         shell: bash
@@ -278,9 +357,12 @@ jobs:
           test -s "$CONFIG"
 
           KERNEL_VERSION="$(make -s kernelversion)"
+
           VERSION_MAJOR="${KERNEL_VERSION%%.*}"
           VERSION_REST="${KERNEL_VERSION#*.}"
           VERSION_MINOR="${VERSION_REST%%.*}"
+
+          echo "Kernel version: $KERNEL_VERSION"
 
           cat > "$CHECK_MK" <<'EOF'
           include $(KSU_CONFIG_FILE)
@@ -306,22 +388,34 @@ jobs:
             check \
             2>&1 | tee artifacts/manual-hook-check.log
 
-      # 8. VERIFY TOOLCHAIN
+          echo "PASS: BakaSU manual-hook validation."
+
+      # --------------------------------------------------
+      # 9. VERIFY TOOLCHAIN
+      # --------------------------------------------------
 
       - name: Verify compiler and linkers
         shell: bash
         run: |
           set -euo pipefail
 
+          echo "Clang:"
+          command -v clang
           clang --version
 
+          echo "ARM64 linker:"
+          command -v aarch64-linux-gnu-ld
           aarch64-linux-gnu-ld --version
 
+          echo "ARM32 compatibility linker:"
+          command -v arm-linux-gnueabi-ld
           arm-linux-gnueabi-ld --version
 
           echo "PASS: Toolchain validation."
 
-      # 9. COMPILE IMAGE.GZ ONLY
+      # --------------------------------------------------
+      # 10. COMPILE IMAGE.GZ ONLY
+      # --------------------------------------------------
 
       - name: Compile Sweet Image.gz
         shell: bash
@@ -369,7 +463,9 @@ jobs:
 
           echo "PASS: Image.gz compilation completed."
 
-      # 10. BUILD INFORMATION
+      # --------------------------------------------------
+      # 11. RECORD BUILD INFORMATION
+      # --------------------------------------------------
 
       - name: Record build information
         if: always()
@@ -379,7 +475,7 @@ jobs:
           mkdir -p artifacts
 
           {
-            echo "MR MATRIX - Sweet BakaSU Image.gz"
+            echo "MR MATRIX - Sweet DroidSpaces BakaSU Image.gz"
             echo "Repository: $KERNEL_REPO"
             echo "Branch: $KERNEL_BRANCH"
             echo "Kernel commit: $(git rev-parse HEAD)"
@@ -390,6 +486,7 @@ jobs:
 
             echo
             echo "Image.gz:"
+
             if [ -s artifacts/Image.gz ]; then
               ls -lh artifacts/Image.gz
               sha256sum artifacts/Image.gz
@@ -399,13 +496,15 @@ jobs:
 
           } > artifacts/build-info.txt
 
-      # 11. UPLOAD ARTIFACTS
+      # --------------------------------------------------
+      # 12. UPLOAD ARTIFACTS
+      # --------------------------------------------------
 
       - name: Upload Image.gz build artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: MR-MATRIX-Sweet-BakaSU-Image.gz
+          name: MR-MATRIX-Sweet-DroidSpaces-BakaSU-Image.gz
           path: kernel/artifacts/
           if-no-files-found: warn
           retention-days: 14
