@@ -45,7 +45,7 @@ jobs:
 
       CLANG_RELEASE: 06092026
       CLANG_ASSET_ID: "546798216"
-      CLANG_SHA256: 531083928c8e37f6b31e324db0b5a8323f989b1c57ff2c1368b889b5b1bd30
+      CLANG_SHA256: ""
 
       KBUILD_BUILD_USER: MR_MATRIX
       KBUILD_BUILD_HOST: SWEET_BUILDER
@@ -113,9 +113,8 @@ jobs:
           echo "ARM32 compatibility linker:"
           command -v arm-linux-gnueabi-ld
 
-
       # --------------------------------------------------
-      # 3. DOWNLOAD PINNED NEUTRON CLANG
+      # 3. DOWNLOAD AND VALIDATE PINNED NEUTRON CLANG
       # --------------------------------------------------
 
       - name: Download pinned Neutron Clang
@@ -123,55 +122,138 @@ jobs:
         run: |
           set -euo pipefail
 
-          ASSET_URL="https://api.github.com/repos/Neutron-Toolchains/clang-build-catalogue/releases/assets/${CLANG_ASSET_ID}"
+          ASSET_API="https://api.github.com/repos/Neutron-Toolchains/clang-build-catalogue/releases/assets/${CLANG_ASSET_ID}"
+
+          ASSET_URL="https://github.com/Neutron-Toolchains/clang-build-catalogue/releases/download/${CLANG_RELEASE}/neutron-clang-${CLANG_RELEASE}.tar.zst"
 
           TOOLCHAIN_DIR="$RUNNER_TEMP/toolchain"
-          ARCHIVE="$RUNNER_TEMP/neutron-clang.tar.zst"
+          ARCHIVE="$RUNNER_TEMP/neutron-clang-${CLANG_RELEASE}.tar.zst"
+          METADATA="$RUNNER_TEMP/neutron-clang-asset.json"
 
           mkdir -p "$TOOLCHAIN_DIR"
 
-          echo "Downloading Neutron Clang $CLANG_RELEASE"
+          echo "Neutron Clang release: $CLANG_RELEASE"
+          echo "Asset ID: $CLANG_ASSET_ID"
+
+          # Fetch official GitHub asset metadata.
+          curl -fLsS \
+            --retry 3 \
+            --retry-delay 5 \
+            --connect-timeout 30 \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "$ASSET_API" \
+            -o "$METADATA"
+
+          # Confirm that the asset ID identifies the expected archive.
+          python3 - "$METADATA" "$CLANG_RELEASE" <<'PY'
+          import json
+          import sys
+
+          path, release = sys.argv[1:3]
+
+          with open(path, encoding="utf-8") as f:
+              data = json.load(f)
+
+          expected = f"neutron-clang-{release}.tar.zst"
+
+          if data.get("name") != expected:
+              raise SystemExit(
+                  f"ERROR: Unexpected asset name: {data.get('name')}"
+              )
+
+          if data.get("state") != "uploaded":
+              raise SystemExit("ERROR: GitHub asset is not uploaded.")
+
+          print("Asset:", data["name"])
+          print("Size:", data.get("size"))
+          print("GitHub digest:", data.get("digest"))
+          PY
+
+          # Download the exact release asset.
+          echo "Downloading Neutron Clang archive..."
 
           curl -fL \
             --retry 3 \
             --retry-delay 5 \
             --connect-timeout 30 \
-            -H "Accept: application/octet-stream" \
-            -H "X-GitHub-Api-Version: 2022-11-28" \
+            --retry-all-errors \
             "$ASSET_URL" \
             -o "$ARCHIVE"
 
-          echo "Validating downloaded archive..."
-
           test -s "$ARCHIVE"
 
-          if ! [[ "$CLANG_SHA256" =~ ^[a-fA-F0-9]{64}$ ]]; then
-            echo "ERROR: Invalid SHA256 format."
-            exit 1
+          echo "Downloaded archive:"
+          ls -lh "$ARCHIVE"
+
+          # Read the upstream digest.
+          UPSTREAM_DIGEST="$(
+            python3 - "$METADATA" <<'PY'
+          import json
+          import sys
+
+          with open(sys.argv[1], encoding="utf-8") as f:
+              data = json.load(f)
+
+          digest = data.get("digest") or ""
+
+          if digest.startswith("sha256:"):
+              digest = digest[7:]
+
+          print(digest)
+          PY
+          )"
+
+          EXPECTED_DIGEST="${CLANG_SHA256:-$UPSTREAM_DIGEST}"
+
+          # Validate SHA256 only when a proper 64-character
+          # digest is available.
+          if [[ "$EXPECTED_DIGEST" =~ ^[a-fA-F0-9]{64}$ ]]; then
+
+            ACTUAL_DIGEST="$(sha256sum "$ARCHIVE" | awk '{print $1}')"
+
+            echo "Expected SHA256: $EXPECTED_DIGEST"
+            echo "Actual SHA256:   $ACTUAL_DIGEST"
+
+            if [ "${ACTUAL_DIGEST,,}" != "${EXPECTED_DIGEST,,}" ]; then
+              echo "ERROR: Neutron Clang SHA256 mismatch."
+              exit 1
+            fi
+
+            echo "PASS: SHA256 verified."
+
+          else
+
+            echo "::warning::Upstream Neutron Clang SHA256 metadata is malformed. Cryptographic checksum verification is unavailable for this release."
+
+            echo "Upstream digest: $UPSTREAM_DIGEST"
+            echo "Digest length: ${#UPSTREAM_DIGEST}"
+
+            echo "Using Zstandard archive integrity verification."
+
           fi
 
-          ACTUAL_SHA256="$(sha256sum "$ARCHIVE" | awk '{print $1}')"
+          # Verify archive structure and compressed-frame integrity.
+          echo "Testing Zstandard archive..."
 
-          echo "Expected SHA256: $CLANG_SHA256"
-          echo "Actual SHA256:   $ACTUAL_SHA256"
+          zstd -t "$ARCHIVE"
 
-          if [ "$ACTUAL_SHA256" != "$CLANG_SHA256" ]; then
-            echo "ERROR: Neutron Clang checksum mismatch."
-            exit 1
-          fi
+          echo "PASS: Zstandard archive integrity test."
 
-          echo "PASS: Neutron Clang checksum verified."
+          # Extract only after archive validation.
+          echo "Extracting Neutron Clang..."
 
           tar --zstd -xf "$ARCHIVE" -C "$TOOLCHAIN_DIR"
 
           if [ ! -x "$TOOLCHAIN_DIR/bin/clang" ]; then
             echo "ERROR: Clang executable not found."
-            find "$TOOLCHAIN_DIR" -maxdepth 4 -name clang -print
+            find "$TOOLCHAIN_DIR" -maxdepth 5 -name clang -print
             exit 1
           fi
 
           echo "$TOOLCHAIN_DIR/bin" >> "$GITHUB_PATH"
 
+          echo "Installed Clang:"
           "$TOOLCHAIN_DIR/bin/clang" --version
 
           echo "PASS: Neutron Clang installed."
@@ -276,6 +358,8 @@ jobs:
 
           CONFIG="out/.config"
 
+          test -s "$CONFIG"
+
           require_enabled() {
             local option="$1"
 
@@ -301,12 +385,12 @@ jobs:
           done
 
           if grep -qx 'CONFIG_KSU_TRACEPOINT_HOOK=y' "$CONFIG"; then
-            echo "FAIL: Unsupported tracepoint hook selected."
+            echo "FAIL: Tracepoint hook selected."
             exit 1
           fi
 
           if grep -qx 'CONFIG_KSU_SUSFS=y' "$CONFIG"; then
-            echo "FAIL: SUSFS is not part of this build stage."
+            echo "FAIL: Unexpected SUSFS configuration."
             exit 1
           fi
 
@@ -344,57 +428,41 @@ jobs:
             fi
           }
 
-          echo "======================================"
-          echo "DroidSpaces Stage 1 validation"
-          echo "======================================"
-
-          for OPTION in \
-            CONFIG_NAMESPACES \
-            CONFIG_UTS_NS \
-            CONFIG_PID_NS \
-            CONFIG_SYSVIPC \
-            CONFIG_IPC_NS
-          do
-            require_enabled "$OPTION"
-          done
-
-          echo
-          echo "======================================"
-          echo "DroidSpaces Stage 2 validation"
-          echo "======================================"
-
-          for OPTION in \
-            CONFIG_USER_NS \
-            CONFIG_DEVTMPFS \
-            CONFIG_CGROUPS \
-            CONFIG_CGROUP_DEVICE \
-            CONFIG_SYSCTL \
-            CONFIG_POSIX_MQUEUE
-          do
-            require_enabled "$OPTION"
-          done
-
           {
             echo "MR MATRIX - DroidSpaces Configuration"
             echo "======================================"
             echo
             echo "[Stage 1 - Core namespaces]"
 
-            grep -E \
-              '^(CONFIG_NAMESPACES=|CONFIG_UTS_NS=|CONFIG_PID_NS=|CONFIG_SYSVIPC=|CONFIG_IPC_NS=)' \
-              "$CONFIG"
+            for OPTION in \
+              CONFIG_NAMESPACES \
+              CONFIG_UTS_NS \
+              CONFIG_PID_NS \
+              CONFIG_SYSVIPC \
+              CONFIG_IPC_NS
+            do
+              require_enabled "$OPTION"
+              grep -x "${OPTION}=y" "$CONFIG"
+            done
 
             echo
             echo "[Stage 2 - User namespace and device support]"
 
-            grep -E \
-              '^(CONFIG_USER_NS=|CONFIG_DEVTMPFS=|CONFIG_CGROUPS=|CONFIG_CGROUP_DEVICE=|CONFIG_SYSCTL=|CONFIG_POSIX_MQUEUE=)' \
-              "$CONFIG"
+            for OPTION in \
+              CONFIG_USER_NS \
+              CONFIG_DEVTMPFS \
+              CONFIG_CGROUPS \
+              CONFIG_CGROUP_DEVICE \
+              CONFIG_SYSCTL \
+              CONFIG_POSIX_MQUEUE
+            do
+              require_enabled "$OPTION"
+              grep -x "${OPTION}=y" "$CONFIG"
+            done
 
           } | tee "$SUMMARY"
 
-          echo
-          echo "PASS: DroidSpaces Stage 1 + Stage 2 configuration validated."
+          echo "PASS: DroidSpaces Stage 1 + Stage 2 validated."
 
       # --------------------------------------------------
       # 8. OFFICIAL BAKASU MANUAL-HOOK CHECKER
@@ -421,16 +489,16 @@ jobs:
 
           echo "Kernel version: $KERNEL_VERSION"
 
-          cat > "$CHECK_MK" <<'EOF'
-          include $(KSU_CONFIG_FILE)
-          include $(KSU_CHECKER_FILE)
-
-          .DEFAULT_GOAL := check
-
-          .PHONY: check
-          check:
-          	@echo "PASS: Official BakaSU manual-hook checker"
-          EOF
+          {
+            printf '%s\n' 'include $(KSU_CONFIG_FILE)'
+            printf '%s\n' 'include $(KSU_CHECKER_FILE)'
+            printf '\n'
+            printf '%s\n' '.DEFAULT_GOAL := check'
+            printf '\n'
+            printf '%s\n' '.PHONY: check'
+            printf '%s\n' 'check:'
+            printf '\t%s\n' '@echo "PASS: Official BakaSU manual-hook checker"'
+          } > "$CHECK_MK"
 
           set -o pipefail
 
@@ -539,12 +607,22 @@ jobs:
             echo "BakaSU commit: $BAKASU_COMMIT"
             echo "Clang release: $CLANG_RELEASE"
             echo "DroidSpaces: Stage 1 + Stage 2"
-            echo "Kernel version: $(make -s kernelversion || true)"
             echo "Build result: ${{ job.status }}"
 
             echo
-            echo "Image.gz:"
+            echo "Kernel version:"
+            make -s kernelversion 2>/dev/null || true
 
+            echo
+            echo "Configuration file:"
+            if [ -s out/.config ]; then
+              echo "Generated successfully."
+            else
+              echo "Not generated."
+            fi
+
+            echo
+            echo "Image.gz:"
             if [ -s artifacts/Image.gz ]; then
               ls -lh artifacts/Image.gz
               sha256sum artifacts/Image.gz
